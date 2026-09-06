@@ -34,6 +34,21 @@ class SimConfig:
 
 
 @dataclass
+class Providers:
+    """Injectable real-data hooks (historical replay / live). Any None falls
+    back to SimConfig synthetic behavior — one simulator, three harnesses
+    (synthetic, backtest, live), which is what makes signal-parity checks
+    meaningful.
+      mark_fn(spot, strike, minute, right) -> (mid, spread)
+      levels_fn(bar_index) -> (put_wall, call_wall, g_max)
+      regimes: per-bar regime list
+    """
+    mark_fn: object | None = None
+    levels_fn: object | None = None
+    regimes: list[str] | None = None
+
+
+@dataclass
 class TradeRecord:
     entry_minute: int
     exit_minute: int
@@ -68,36 +83,46 @@ class DaySimulator:
                  entry_params: EntryParams | None = None,
                  exit_params: CParams | None = None,
                  disc_params: DisciplineParams | None = None,
-                 cost_params: CostParams | None = None):
+                 cost_params: CostParams | None = None,
+                 providers: 'Providers | None' = None):
         self.cfg = cfg or SimConfig()
         self.entries = EntryEngine(entry_params)
         self.exits = ExitEngine(exit_params)
         self.disc = DisciplineState(disc_params or DisciplineParams(),
                                     tranche_equity_open=self.cfg.tranche)
         self.fills = FillModel(cost_params)
+        self.prov = providers or Providers()
 
     # ── option pricing helpers (XSP scale) ───────────────────────────
     def _strike_for(self, spot: float, direction: int) -> float:
         xsp = spot / self.cfg.xsp_divisor
         return (float(int(xsp)) + (1.0 if direction > 0 else 0.0))  # nearest ATM-ish
 
-    def _mark(self, spot: float, strike: float, minute: int, right: str) -> float:
+    def _mark(self, spot: float, strike: float, minute: int, right: str) -> tuple[float, float]:
+        if self.prov.mark_fn is not None:
+            return self.prov.mark_fn(spot, strike, minute, right)
         t = self.cfg.dte_years - (minute - (9 * 60 + 30)) / (390.0 * 252.0)
-        return float(greeks.price(spot / self.cfg.xsp_divisor, strike, max(t, 1e-6),
-                                  self.cfg.iv, right))
+        mid = float(greeks.price(spot / self.cfg.xsp_divisor, strike, max(t, 1e-6),
+                                 self.cfg.iv, right))
+        return mid, self.cfg.quoted_spread
 
     # ── market state construction per bar ────────────────────────────
     def _mkt(self, bars: list[Bar], i: int, session_high: float,
              regime: str) -> MarketState:
         b, prev = bars[i], bars[i - 1] if i else bars[i]
         c = self.cfg
+        if self.prov.levels_fn is not None:
+            pw, cw, gm = self.prov.levels_fn(i)
+        else:
+            pw, cw, gm = c.put_wall, c.call_wall, c.g_max
+        self._cur_levels = (pw, cw, gm)
         near_support = min(
-            (lvl for lvl in (c.put_wall, c.g_max) if lvl < b.close),
+            (lvl for lvl in (pw, gm) if lvl is not None and lvl < b.close),
             key=lambda l: b.close - l, default=None)
         bounce = (near_support is not None
                   and b.low <= near_support * 1.0012
                   and b.close > near_support and b.close > b.open)
-        breakdown = prev.close > c.put_wall >= b.close
+        breakdown = pw is not None and prev.close > pw >= b.close
         # bars since new session high
         bsnh = 0
         for j in range(i, -1, -1):
@@ -106,8 +131,8 @@ class DaySimulator:
             bsnh += 1
         return MarketState(
             minute=b.minute, spot=b.close, session_high=session_high,
-            regime=regime, put_wall=c.put_wall, call_wall=c.call_wall,
-            g_max=c.g_max, bar_close_above_level=bounce,
+            regime=regime, put_wall=pw, call_wall=cw,
+            g_max=gm, bar_close_above_level=bounce,
             bar_break_below_level=breakdown, option_spread=c.quoted_spread,
             news_blocked=False, bars_since_new_high=bsnh,
             lower_high_close_below_prior_low=(b.high < prev.high and b.close < prev.low),
@@ -116,7 +141,7 @@ class DaySimulator:
     # ── main loop ────────────────────────────────────────────────────
     def run(self, bars: list[Bar]) -> DayResult:
         cfg, res = self.cfg, DayResult()
-        regimes = cfg.regime_by_bar or ["P"] * len(bars)
+        regimes = self.prov.regimes or cfg.regime_by_bar or ["P"] * len(bars)
         pos: Position | None = None
         pos_meta: dict = {}
         session_high = bars[0].high
@@ -128,16 +153,16 @@ class DaySimulator:
 
             if pos is not None:
                 right = "C" if pos.direction > 0 else "P"
-                mark = self._mark(b.close, pos_meta["strike"], b.minute, right)
+                mark, spr = self._mark(b.close, pos_meta["strike"], b.minute, right)
                 regime_exit = (m.regime != "P" and pos_meta["kind"] in ("bounce", "flip", "reversal"))
                 act = self.exits.evaluate(
                     pos, spot=b.close * pos.direction if False else b.close,
                     option_mark=mark, minute_of_day=b.minute, atr30=a30,
-                    gamma_support=cfg.g_max if pos.direction > 0 else None,
+                    gamma_support=(self._cur_levels[2] if pos.direction > 0 else None),
                     regime_or_news_exit=regime_exit)
                 if act.kind != "hold":
                     stop_hit = act.kind in (ExitReason.HARD_STOP, ExitReason.TRAIL)
-                    fill, drag = self.fills.sell(mark, cfg.quoted_spread,
+                    fill, drag = self.fills.sell(mark, spr,
                                                  act.close_contracts,
                                                  stop_triggered=(act.kind == ExitReason.HARD_STOP))
                     pnl = (fill - pos_meta["entry_fill"]) * 100 * act.close_contracts \
@@ -189,10 +214,10 @@ class DaySimulator:
         cfg = self.cfg
         right = "C" if sig.direction > 0 else "P"
         strike = self._strike_for(b.close, sig.direction)
-        mid = self._mark(b.close, strike, b.minute, right)
+        mid, spr = self._mark(b.close, strike, b.minute, right)
         budget = cfg.premium_budget_frac * cfg.tranche
         contracts = max(1, int(budget / (mid * 100)))
-        fill, drag = self.fills.buy(mid, cfg.quoted_spread, contracts)
+        fill, drag = self.fills.buy(mid, spr, contracts)
         self.disc.on_entry(direction=sig.direction, is_reentry_after_trail=False)
         pos = Position(direction=sig.direction, entry_spot=b.close,
                        entry_premium=fill, contracts=contracts,
