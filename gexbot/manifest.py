@@ -26,16 +26,21 @@ CREATE TABLE IF NOT EXISTS pipeline_manifest (
 
 
 class Manifest:
+    """Connects per-operation: no long-held write lock, so `status` and other
+    readers can always open the file even while a backfill runs."""
+
     def __init__(self, db_path: Path):
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.con = duckdb.connect(str(db_path))
-        self.con.execute(_SCHEMA)
+        self.path = str(db_path)
+        with duckdb.connect(self.path) as con:
+            con.execute(_SCHEMA)
 
     def done(self, dataset: str, day: dt.date) -> bool:
-        row = self.con.execute(
+        with duckdb.connect(self.path, read_only=True) as con:
+            row = con.execute(
             "SELECT state FROM pipeline_manifest WHERE dataset=? AND day=?",
-            [dataset, day],
-        ).fetchone()
+                [dataset, day],
+            ).fetchone()
         return row is not None and row[0] in ("converted", "empty")
 
     def mark(
@@ -48,16 +53,18 @@ class Manifest:
         parquet_bytes: int = 0,
         error: str | None = None,
     ) -> None:
-        self.con.execute(
-            """INSERT OR REPLACE INTO pipeline_manifest
+        with duckdb.connect(self.path) as con:
+            con.execute(
+                """INSERT OR REPLACE INTO pipeline_manifest
                (dataset, day, state, rows_kept, raw_bytes, parquet_bytes, error)
-               VALUES (?,?,?,?,?,?,?)""",
-            [dataset, day, state, rows_kept, raw_bytes, parquet_bytes, error],
-        )
+                   VALUES (?,?,?,?,?,?,?)""",
+                [dataset, day, state, rows_kept, raw_bytes, parquet_bytes, error],
+            )
 
     def summary(self) -> list[tuple]:
-        return self.con.execute(
+        with duckdb.connect(self.path, read_only=True) as con:
+            return con.execute(
             """SELECT dataset, state, count(*) AS days,
                       sum(rows_kept) AS rows, sum(parquet_bytes)/1e9 AS gb
-               FROM pipeline_manifest GROUP BY dataset, state ORDER BY dataset"""
-        ).fetchall()
+                   FROM pipeline_manifest GROUP BY dataset, state ORDER BY dataset"""
+            ).fetchall()

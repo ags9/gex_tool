@@ -58,6 +58,11 @@ def main() -> None:
 
     sub.add_parser("discord-test", help="send a test message to each configured webhook")
 
+    bt = sub.add_parser("backtest", help="replay a date range through Strategy C and report gates")
+    bt.add_argument("--start", type=dt.date.fromisoformat, required=True)
+    bt.add_argument("--end", type=dt.date.fromisoformat, required=True)
+    bt.add_argument("--tranche", type=float, default=3000.0)
+
     args = p.parse_args()
     if args.cmd == "status":
         _summary(Manifest(settings.gex_manifest_db))  # type: ignore[arg-type]
@@ -74,6 +79,9 @@ def main() -> None:
         n.daily_digest(body="Test — daily digests will appear here.", green_day=True)
         n.flush()
         console.print(f"[green]Sent test messages to {len(n.webhooks)} configured channel(s).")
+    elif args.cmd == "backtest":
+        from .backtest import run_backtest
+        run_backtest(args.start, args.end, tranche=args.tranche)
     else:
         datasets = args.dataset or ["opra_trades", "opra_quotes", "index_values"]
         backfill(datasets, args.start, args.end)
