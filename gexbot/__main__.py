@@ -56,9 +56,24 @@ def main() -> None:
 
     sub.add_parser("status", help="print manifest summary")
 
+    sub.add_parser("discord-test", help="send a test message to each configured webhook")
+
     args = p.parse_args()
     if args.cmd == "status":
         _summary(Manifest(settings.gex_manifest_db))  # type: ignore[arg-type]
+    elif args.cmd == "discord-test":
+        from dotenv import load_dotenv  # type: ignore
+        load_dotenv()
+        from .notify import Channel, Color, from_settings
+        n = from_settings()
+        if not n.webhooks:
+            console.print("[red]No webhook URLs configured in .env")
+            return
+        n.send(Channel.TRADES, "Test — trades channel", "Entry/exit messages will appear here.", Color.BLUE)
+        n.breaker(name="Test — alerts channel", detail="Circuit breakers and warnings will ping here.")
+        n.daily_digest(body="Test — daily digests will appear here.", green_day=True)
+        n.flush()
+        console.print(f"[green]Sent test messages to {len(n.webhooks)} configured channel(s).")
     else:
         datasets = args.dataset or ["opra_trades", "opra_quotes", "index_values"]
         backfill(datasets, args.start, args.end)
