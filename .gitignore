@@ -6,3 +6,4 @@ __pycache__/
 data/
 *.duckdb
 *.parquet
+.DS_Store
