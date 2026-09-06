@@ -3,6 +3,8 @@ pyproject.toml
 gexbot/__init__.py
 gexbot/__main__.py
 gexbot/config.py
+gexbot/discipline.py
+gexbot/entries.py
 gexbot/exits.py
 gexbot/greeks.py
 gexbot/ledger.py
@@ -14,4 +16,5 @@ gexbot.egg-info/SOURCES.txt
 gexbot.egg-info/dependency_links.txt
 gexbot.egg-info/requires.txt
 gexbot.egg-info/top_level.txt
+tests/test_entries_discipline.py
 tests/test_strategy_c.py
