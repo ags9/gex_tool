@@ -22,6 +22,19 @@ from .config import settings
 from .manifest import Manifest
 
 console = Console()
+
+
+def _converted(manifest, d):
+    """REST fetch retries days the flat-file path marked 'empty' — those 404s
+    mean the flat file never existed, not that the day has no data."""
+    import duckdb
+    with duckdb.connect(manifest.path, read_only=True) as con:
+        row = con.execute(
+            "SELECT state FROM pipeline_manifest WHERE dataset='index_values' AND day=?",
+            [d]).fetchone()
+    return row is not None and row[0] == "converted"
+
+
 BASE = "https://api.polygon.io"   # api.massive.com equivalent; both valid
 
 
@@ -63,7 +76,7 @@ def backfill_index_rest(start: dt.date, end: dt.date) -> None:
 
     d = start
     while d <= end:
-        if d.weekday() < 5 and not manifest.done("index_values", d):
+        if d.weekday() < 5 and not _converted(manifest, d):
             frames = []
             for ticker in settings.index_tickers:
                 df = fetch_index_day(ticker, d, api_key)
