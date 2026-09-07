@@ -200,15 +200,29 @@ class ReplayBuilder:
 
         books: dict[tuple, QuoteBook] = {}
 
+        # choose the replay contract's expiry once per day: nearest listed
+        # XSP expiry >= 3 calendar days out (C.2: 3-4 DTE)
+        expiries = None
+        if quotes_lf is not None:
+            expiries = sorted(
+                quotes_lf.filter(pl.col("root") == self.xsp_root)
+                         .select("expiry").unique().collect()["expiry"].to_list())
+        target_expiry = None
+        if expiries:
+            candidates = [e for e in expiries if (e - day).days >= 3]
+            target_expiry = candidates[0] if candidates else expiries[-1]
+
         def mark_fn(spot: float, strike: float, minute: int, right: str):
             key = (strike, right)
             if key not in books and quotes_lf is not None:
                 # nearest listed XSP expiry >= 3 trading days is chosen upstream
                 # in v0 we take the front root match on strike/right
-                qdf = (quotes_lf.filter(
-                    (pl.col("root") == self.xsp_root)
-                    & (pl.col("strike") == strike) & (pl.col("right") == right))
-                    .collect(engine="streaming"))
+                flt = ((pl.col("root") == self.xsp_root)
+                       & (pl.col("strike") == strike) & (pl.col("right") == right))
+                if target_expiry is not None:
+                    flt = flt & (pl.col("expiry") == target_expiry)
+                qdf = (quotes_lf.filter(flt)
+                       .collect(engine="streaming"))
                 books[key] = QuoteBook(qdf) if not qdf.is_empty() else None
             book = books.get(key)
             m = book.mark(minute) if book else None

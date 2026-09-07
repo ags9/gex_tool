@@ -61,6 +61,11 @@ class DisciplineState:
         elif self.losing_trades_today >= self.p.max_losing_trades_per_day:
             self.halted, self.halt_reason = True, "2 losing trades — done for the day"
 
+    def on_partial(self, *, pnl_dollars: float) -> None:
+        """PT1 partial closes: count the money, not the trade."""
+        self.realized_pnl_today += pnl_dollars
+        self._check_halts()
+
     # ── the gate ─────────────────────────────────────────────────────
     def may_enter(self, *, minute: int, direction: int,
                   is_reentry_after_trail: bool, is_range_day: bool) -> tuple[bool, str]:

@@ -172,6 +172,8 @@ class DaySimulator:
                         act.close_contracts, pos_meta["entry_fill"], fill,
                         str(act.kind), pnl, drag))
                     fully_closed = (act.kind != ExitReason.PT1_PARTIAL) or pos.remaining == 0
+                    if not fully_closed:
+                        self.disc.on_partial(pnl_dollars=pnl)
                     if fully_closed:
                         self.disc.on_exit(
                             pnl_dollars=pnl,
