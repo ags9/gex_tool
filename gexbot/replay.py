@@ -26,7 +26,8 @@ from .ledger import (BaselineModel, BlockFlowTracker, Ledger, classify_trade)
 from .synth import BAR_MIN, SESSION_START, Bar
 
 # flat-file column names (single place to adapt if schema differs)
-COL_TS = "sip_timestamp"        # ns since epoch in OPRA files
+COL_TS = "sip_timestamp"        # ns since epoch in OPRA (options) files
+COL_TS_IDX = "timestamp"        # index flat files use plain "timestamp"
 COL_PRICE = "price"
 COL_SIZE = "size"
 COL_BID = "bid_price"
@@ -87,12 +88,17 @@ class ReplayBuilder:
         p = self.root / dataset / f"date={day}" / "data.parquet"
         return pl.read_parquet(p) if p.exists() else None
 
+    def _scan(self, dataset: str, day: dt.date) -> pl.LazyFrame | None:
+        p = self.root / dataset / f"date={day}" / "data.parquet"
+        return pl.scan_parquet(p) if p.exists() else None
+
     def spx_bars(self, day: dt.date) -> list[Bar]:
         df = self._read("index_values", day)
         if df is None or df.is_empty():
             raise FileNotFoundError(f"no index_values for {day}")
+        ts_col = COL_TS_IDX if COL_TS_IDX in df.columns else COL_TS
         df = df.filter(pl.col("ticker") == IDX_TICKER).with_columns(
-            pl.col(COL_TS).map_elements(_minute_of_day_et, return_dtype=pl.Int64)
+            pl.col(ts_col).map_elements(_minute_of_day_et, return_dtype=pl.Int64)
             .alias("mod")
         ).filter((pl.col("mod") >= SESSION_START) & (pl.col("mod") < 16 * 60))
         df = df.with_columns(
@@ -112,7 +118,6 @@ class ReplayBuilder:
     def levels_by_bar(self, day: dt.date, bars: list[Bar],
                       oi_path: Path | None = None) -> tuple[list[tuple], BlockFlowTracker]:
         trades = self._read("opra_trades", day)
-        quotes = self._read("opra_quotes", day)
         led = Ledger(spot=bars[0].close, baseline=self.baseline)
         t_years = 4 / 252
         blocks = BlockFlowTracker()
@@ -139,20 +144,33 @@ class ReplayBuilder:
 
         # pre-bucket classified SPX-complex trades by bar
         flow_by_bar: dict[int, list] = {}
-        if trades is not None and quotes is not None and not trades.is_empty():
-            tq = trades.filter(pl.col("root").is_in(self.spx_roots))
-            # nearest-quote NBBO per trade via asof join on timestamp+ticker
-            qq = quotes.select(["ticker", COL_TS, COL_BID, COL_ASK]).sort(COL_TS)
-            tq = tq.sort("ticker", COL_TS).join_asof(qq.sort("ticker", COL_TS), on=COL_TS, by="ticker",
-                                           strategy="backward")
+        if trades is not None and not trades.is_empty():
+            # TICK-RULE classification (spec pivot): sign of each trade vs the
+            # prior trade in the same contract, zero-ticks inherit the last
+            # nonzero direction. Needs trades only — the 2B-row quote join
+            # that OOM-killed 16GB machines is gone from the ledger path.
+            # NBBO-based classification remains available for validation-day
+            # studies via a direct script; question: measured accuracy delta.
+            tq = (trades.lazy()
+                  .filter(pl.col("root").is_in(self.spx_roots))
+                  .sort("ticker", COL_TS)
+                  .with_columns(
+                      pl.col(COL_PRICE).diff().over("ticker").alias("_d"))
+                  .with_columns(
+                      pl.when(pl.col("_d") > 0).then(1)
+                        .when(pl.col("_d") < 0).then(-1)
+                        .otherwise(None).alias("_side"))
+                  .with_columns(
+                      pl.col("_side").forward_fill().over("ticker")
+                        .fill_null(0).alias("side"))
+                  .select(["strike", "right", COL_SIZE, COL_TS, "side"])
+                  .collect())
             for r in tq.iter_rows(named=True):
                 mod = _minute_of_day_et(r[COL_TS])
                 if not (SESSION_START <= mod < 16 * 60):
                     continue
                 bar_i = (mod - SESSION_START) // BAR_MIN
-                if r[COL_BID] is None or r[COL_ASK] is None:
-                    continue
-                side = classify_trade(r[COL_PRICE], r[COL_BID], r[COL_ASK])
+                side = int(r["side"])
                 if side:
                     flow_by_bar.setdefault(bar_i, []).append(
                         (float(r["strike"]), r["right"], int(r[COL_SIZE]), side))
@@ -178,18 +196,19 @@ class ReplayBuilder:
     def build(self, day: dt.date, *, oi_path: Path | None = None) -> ReplayDay:
         bars = self.spx_bars(day)
         levels, blocks = self.levels_by_bar(day, bars, oi_path=oi_path)
-        quotes = self._read("opra_quotes", day)
+        quotes_lf = self._scan("opra_quotes", day)
 
         books: dict[tuple, QuoteBook] = {}
 
         def mark_fn(spot: float, strike: float, minute: int, right: str):
             key = (strike, right)
-            if key not in books and quotes is not None:
+            if key not in books and quotes_lf is not None:
                 # nearest listed XSP expiry >= 3 trading days is chosen upstream
                 # in v0 we take the front root match on strike/right
-                qdf = quotes.filter(
+                qdf = (quotes_lf.filter(
                     (pl.col("root") == self.xsp_root)
                     & (pl.col("strike") == strike) & (pl.col("right") == right))
+                    .collect(engine="streaming"))
                 books[key] = QuoteBook(qdf) if not qdf.is_empty() else None
             book = books.get(key)
             m = book.mark(minute) if book else None

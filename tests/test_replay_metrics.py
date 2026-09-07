@@ -50,13 +50,15 @@ def parquet_root(tmp_path: Path) -> Path:
     # activity at 7620 (call wall) — flow-only ledger will place levels there
     trows = []
     for k, mod in enumerate(range(SESSION_START + 1, SESSION_START + 61, 2)):
+        # rising put prices (upticks) = tick-rule BUY pressure at 7550;
+        # rising call prices at 7620 likewise — mirrors NBBO-classified intent
         trows.append({"ticker": "O:SPXW250610P07550000", "root": "SPXW",
                       "strike": 7550.0, "right": "P",
-                      "expiry": DAY, "price": 10.4, "size": 200,
+                      "expiry": DAY, "price": 10.4 + 0.05 * k, "size": 200,
                       "sip_timestamp": ET_TO_UTC_NS(mod)})
         trows.append({"ticker": "O:SPXW250610C07620000", "root": "SPXW",
                       "strike": 7620.0, "right": "C",
-                      "expiry": DAY, "price": 8.6, "size": 150,
+                      "expiry": DAY, "price": 8.6 + 0.05 * k, "size": 150,
                       "sip_timestamp": ET_TO_UTC_NS(mod)})
     d = root / "opra_trades" / f"date={DAY}"
     d.mkdir(parents=True)
