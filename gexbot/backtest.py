@@ -40,8 +40,13 @@ def run_backtest(start: dt.date, end: dt.date, *, tranche: float = 3000.0,
                                    providers=day.providers)
                 res = sim.run(day.bars)
                 results.append(res)
+                bf = day.block_flow_by_bar or {}
+                bfl = day.block_flow_near_level_by_bar or {}
                 day_rows.append({"day": d, "pnl": res.pnl, "trades": len(res.trades),
-                                 "costs": res.total_costs, "halted": res.halted})
+                                 "costs": res.total_costs, "halted": res.halted,
+                                 "block_flow_net": sum(bf.values()),
+                                 "block_flow_gross": sum(abs(v) for v in bf.values()),
+                                 "block_flow_near_levels_net": sum(bfl.values())})
                 for t in res.trades:
                     row = asdict(t); row["day"] = d
                     globals().setdefault("_trade_rows", []).append(row)

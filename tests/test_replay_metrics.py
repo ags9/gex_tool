@@ -132,3 +132,32 @@ def test_walk_forward_is_chronological():
     is_, oos = walk_forward_split(days, oos_frac=0.25)
     assert len(is_) == 75 and len(oos) == 25
     assert oos[0] is days[75]                             # no shuffling, ever
+
+
+def test_block_flow_tracker_measures_and_stays_out_of_trading():
+    """Question-8 feature: blocks are measured (signed, level-weighted) but
+    nothing in entries/exits consumes them — logged-only by design."""
+    from gexbot.ledger import BlockFlowParams, BlockFlowTracker
+    t = BlockFlowTracker(BlockFlowParams(min_contracts=1000))
+    # aggressive 2k call buy near a level = +2000, counted in both scores
+    t.on_trade(bar_i=3, right="C", size=2000, customer_side=1,
+               strike=7550.0, spot=7552.0, levels=(7550.0, 7620.0))
+    # aggressive 1.5k put buy away from levels = -1500, general only
+    t.on_trade(bar_i=3, right="P", size=1500, customer_side=1,
+               strike=7400.0, spot=7552.0, levels=(7550.0, 7620.0))
+    # small trade ignored entirely
+    t.on_trade(bar_i=3, right="C", size=50, customer_side=1,
+               strike=7550.0, spot=7552.0, levels=(7550.0,))
+    assert t.score(3) == 500.0                 # +2000 - 1500
+    assert t.near_level_score(3) == 2000.0
+    # and MarketState has no block-flow field — the wall between measurement
+    # and trading is structural, not conventional
+    from gexbot.entries import MarketState
+    assert not any(f.startswith("block_flow") for f in MarketState.__dataclass_fields__)
+
+
+def test_replay_exposes_block_flow(parquet_root):
+    from gexbot.replay import ReplayBuilder
+    rb = ReplayBuilder(parquet_root)
+    day = rb.build(DAY)
+    assert day.block_flow_by_bar is not None   # measured and carried on the day

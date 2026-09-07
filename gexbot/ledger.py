@@ -113,3 +113,50 @@ def classify_trade(trade_price: float, bid: float, ask: float) -> int:
     if trade_price < mid:
         return -1
     return 0
+
+
+# ── block flow (spec C.7 question 8 — logged feature, not a trading rule) ──
+
+from dataclasses import dataclass as _dataclass, field as _field
+
+
+@_dataclass
+class BlockFlowParams:
+    min_contracts: int = 2000        # ⚙ SPX-scale block threshold (SPY scaled /10 upstream)
+    level_proximity_pct: float = 0.0025   # "near a level" window
+
+
+@_dataclass
+class BlockFlowTracker:
+    """Accumulates signed aggressive block flow per bar, with extra weight
+    when the print lands near a computed level. Direction sign convention:
+    +1 = aggressive call buying / put selling (upside pressure),
+    -1 = aggressive put buying / call selling (downside pressure).
+
+    Deliberately a MEASUREMENT, not a signal: nothing in entries/exits reads
+    it. It is logged so backtest question 8 can judge whether it predicts
+    anything before it is ever allowed to gate a trade.
+    """
+    p: BlockFlowParams = _field(default_factory=BlockFlowParams)
+    by_bar: dict[int, float] = _field(default_factory=dict)
+    near_level_by_bar: dict[int, float] = _field(default_factory=dict)
+
+    def on_trade(self, *, bar_i: int, right: str, size: int, customer_side: int,
+                 strike: float, spot: float,
+                 levels: tuple[float | None, ...] = ()) -> None:
+        if size < self.p.min_contracts or customer_side == 0:
+            return
+        # upside pressure: buy calls (+1,C) or sell puts (-1,P)
+        direction = customer_side if right == "C" else -customer_side
+        signed = direction * size
+        self.by_bar[bar_i] = self.by_bar.get(bar_i, 0.0) + signed
+        for lvl in levels:
+            if lvl is not None and abs(strike - lvl) / max(spot, 1e-9) <= self.p.level_proximity_pct:
+                self.near_level_by_bar[bar_i] = self.near_level_by_bar.get(bar_i, 0.0) + signed
+                break
+
+    def score(self, bar_i: int) -> float:
+        return self.by_bar.get(bar_i, 0.0)
+
+    def near_level_score(self, bar_i: int) -> float:
+        return self.near_level_by_bar.get(bar_i, 0.0)

@@ -63,6 +63,10 @@ def main() -> None:
     bt.add_argument("--end", type=dt.date.fromisoformat, required=True)
     bt.add_argument("--tranche", type=float, default=3000.0)
 
+    ir = sub.add_parser("index-rest", help="fast index backfill via REST aggregates (no 2.3GB flat files)")
+    ir.add_argument("--start", type=dt.date.fromisoformat, default=settings.gex_start_date)
+    ir.add_argument("--end", type=dt.date.fromisoformat, default=settings.end_date)
+
     args = p.parse_args()
     if args.cmd == "status":
         _summary(Manifest(settings.gex_manifest_db))  # type: ignore[arg-type]
@@ -82,6 +86,11 @@ def main() -> None:
     elif args.cmd == "backtest":
         from .backtest import run_backtest
         run_backtest(args.start, args.end, tranche=args.tranche)
+    elif args.cmd == "index-rest":
+        from dotenv import load_dotenv  # type: ignore
+        load_dotenv()
+        from .index_rest import backfill_index_rest
+        backfill_index_rest(args.start, args.end)
     else:
         datasets = args.dataset or ["opra_trades", "opra_quotes", "index_values"]
         backfill(datasets, args.start, args.end)

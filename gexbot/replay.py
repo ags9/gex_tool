@@ -22,12 +22,11 @@ from pathlib import Path
 import polars as pl
 
 from .daysim import Providers
-from .ledger import BaselineModel, Ledger, classify_trade
+from .ledger import (BaselineModel, BlockFlowTracker, Ledger, classify_trade)
 from .synth import BAR_MIN, SESSION_START, Bar
 
 # flat-file column names (single place to adapt if schema differs)
-COL_TS = "sip_timestamp"        # ns since epoch in OPRA (options) files
-COL_TS_IDX = "timestamp"        # index flat files use plain "timestamp"
+COL_TS = "sip_timestamp"        # ns since epoch in OPRA files
 COL_PRICE = "price"
 COL_SIZE = "size"
 COL_BID = "bid_price"
@@ -47,6 +46,8 @@ class ReplayDay:
     day: dt.date
     bars: list[Bar]
     providers: Providers
+    block_flow_by_bar: dict[int, float] | None = None
+    block_flow_near_level_by_bar: dict[int, float] | None = None
 
 
 class QuoteBook:
@@ -90,9 +91,8 @@ class ReplayBuilder:
         df = self._read("index_values", day)
         if df is None or df.is_empty():
             raise FileNotFoundError(f"no index_values for {day}")
-        ts_col = COL_TS_IDX if COL_TS_IDX in df.columns else COL_TS
         df = df.filter(pl.col("ticker") == IDX_TICKER).with_columns(
-            pl.col(ts_col).map_elements(_minute_of_day_et, return_dtype=pl.Int64)
+            pl.col(COL_TS).map_elements(_minute_of_day_et, return_dtype=pl.Int64)
             .alias("mod")
         ).filter((pl.col("mod") >= SESSION_START) & (pl.col("mod") < 16 * 60))
         df = df.with_columns(
@@ -110,11 +110,12 @@ class ReplayBuilder:
 
     # ── ledger levels per bar (SPX-scale) ────────────────────────────
     def levels_by_bar(self, day: dt.date, bars: list[Bar],
-                      oi_path: Path | None = None) -> list[tuple]:
+                      oi_path: Path | None = None) -> tuple[list[tuple], BlockFlowTracker]:
         trades = self._read("opra_trades", day)
         quotes = self._read("opra_quotes", day)
         led = Ledger(spot=bars[0].close, baseline=self.baseline)
         t_years = 4 / 252
+        blocks = BlockFlowTracker()
 
         if oi_path is not None and oi_path.exists():
             for r in pl.read_parquet(oi_path).iter_rows(named=True):
@@ -163,16 +164,20 @@ class ReplayBuilder:
             for strike, right, size, side in flow_by_bar.get(i, []):
                 led.on_classified_trade(strike, right, size, side,
                                         iv=0.18, t_years=t_years)
+                blocks.on_trade(bar_i=i, right=right, size=size,
+                                customer_side=side, strike=strike,
+                                spot=b.close,
+                                levels=cached if cached else ())
             if cached is None or i % self.level_refresh_bars == 0:
                 lv = led.levels()
                 cached = (lv["put_wall"], lv["call_wall"], lv["g_max"])
             out.append(cached)
-        return out
+        return out, blocks
 
     # ── assemble a full replay day ───────────────────────────────────
     def build(self, day: dt.date, *, oi_path: Path | None = None) -> ReplayDay:
         bars = self.spx_bars(day)
-        levels = self.levels_by_bar(day, bars, oi_path=oi_path)
+        levels, blocks = self.levels_by_bar(day, bars, oi_path=oi_path)
         quotes = self._read("opra_quotes", day)
 
         books: dict[tuple, QuoteBook] = {}
@@ -199,4 +204,6 @@ class ReplayBuilder:
             return levels[min(i, len(levels) - 1)]
 
         return ReplayDay(day=day, bars=bars,
-                         providers=Providers(mark_fn=mark_fn, levels_fn=levels_fn))
+                         providers=Providers(mark_fn=mark_fn, levels_fn=levels_fn),
+                         block_flow_by_bar=blocks.by_bar,
+                         block_flow_near_level_by_bar=blocks.near_level_by_bar)
