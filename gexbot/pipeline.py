@@ -104,7 +104,10 @@ def process_day(s3, manifest, dataset: str, day: dt.date) -> None:
     raw = settings.gex_raw_dir / dataset / f"{day}.csv.gz"          # type: ignore[operator]
     out = settings.gex_parquet_dir / dataset / f"date={day}" / "data.parquet"  # type: ignore[operator]
 
-    raw_bytes = _download(_s3_client() if s3 is None else s3, key, raw)
+    if raw.exists():
+        raw_bytes = raw.stat().st_size          # reuse prior download (kept after a failed convert)
+    else:
+        raw_bytes = _download(_s3_client() if s3 is None else s3, key, raw)
     if raw_bytes is None:
         manifest.mark(dataset, day, "empty")
         return
@@ -125,8 +128,8 @@ def process_day(s3, manifest, dataset: str, day: dt.date) -> None:
         console.log(f"[red]{dataset} {day} FAILED: {e}")
         if out.exists():
             out.unlink()
-    finally:
-        raw.unlink(missing_ok=True)  # never keep raw whole-market files
+        return                                   # keep raw for cheap retry
+    raw.unlink(missing_ok=True)                  # delete raw only on success
 
 
 def trading_days(start: dt.date, end: dt.date):
