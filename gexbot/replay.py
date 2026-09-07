@@ -26,7 +26,8 @@ from .ledger import BaselineModel, Ledger, classify_trade
 from .synth import BAR_MIN, SESSION_START, Bar
 
 # flat-file column names (single place to adapt if schema differs)
-COL_TS = "sip_timestamp"        # ns since epoch in OPRA files
+COL_TS = "sip_timestamp"        # ns since epoch in OPRA (options) files
+COL_TS_IDX = "timestamp"        # index flat files use plain "timestamp"
 COL_PRICE = "price"
 COL_SIZE = "size"
 COL_BID = "bid_price"
@@ -89,8 +90,9 @@ class ReplayBuilder:
         df = self._read("index_values", day)
         if df is None or df.is_empty():
             raise FileNotFoundError(f"no index_values for {day}")
+        ts_col = COL_TS_IDX if COL_TS_IDX in df.columns else COL_TS
         df = df.filter(pl.col("ticker") == IDX_TICKER).with_columns(
-            pl.col(COL_TS).map_elements(_minute_of_day_et, return_dtype=pl.Int64)
+            pl.col(ts_col).map_elements(_minute_of_day_et, return_dtype=pl.Int64)
             .alias("mod")
         ).filter((pl.col("mod") >= SESSION_START) & (pl.col("mod") < 16 * 60))
         df = df.with_columns(
