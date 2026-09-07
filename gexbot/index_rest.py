@@ -56,9 +56,9 @@ def fetch_index_day(ticker: str, day: dt.date, api_key: str,
                 return None
             return pl.DataFrame({
                 "ticker": [ticker] * len(results),
-                "value": [row["c"] for row in results],      # bar close as the index value
+                "value": [float(row["c"]) for row in results],   # force Float64 — JSON sends whole closes as ints
                 "timestamp": [int(row["t"]) * 1_000_000 for row in results],  # ms -> ns
-            })
+            }, schema={"ticker": pl.Utf8, "value": pl.Float64, "timestamp": pl.Int64})
         except httpx.HTTPError:
             if attempt == retries - 1:
                 raise
