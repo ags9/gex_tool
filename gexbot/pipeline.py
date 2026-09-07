@@ -62,29 +62,55 @@ def _download(s3, key: str, dest: Path) -> int | None:
     return size
 
 
+def _shell_prefilter(raw: Path, dest: Path, roots: set[str]) -> None:
+    """Stream-decompress + grep the whole-market gzip down to our roots.
+    gzip -dc and grep stream in constant memory — Polars scan_csv cannot
+    stream gzip and would decompress ~700GB into RAM."""
+    import subprocess
+    alts = "|".join(sorted({"SPX", "SPXW", "XSP", "SPY"} & roots | {"SPX"}))
+    pattern = "(^|,)\"?O:(" + alts + ")"
+    script = (
+        "gzip -dc \"$1\" | { IFS= read -r h; printf '%s\\n' \"$h\"; "
+        "LC_ALL=C grep -E \"$2\" || true; } > \"$3\""
+    )
+    subprocess.run(["sh", "-c", script, "sh", str(raw), pattern, str(dest)],
+                   check=True)
+
+
 def _filter_options_day(raw: Path, out: Path, roots: set[str]) -> int:
     """Stream-filter a whole-market OPRA csv.gz down to our roots -> Parquet.
 
     Polars' lazy CSV scanner streams gzip without materializing the file.
     We add parsed symbol columns here so the backtest never re-parses.
     """
-    lf = pl.scan_csv(raw, infer_schema_length=10_000)
+    # Native-expression pipeline: streams in bounded memory over billions of
+    # rows. ORDER MATTERS: cheap prefix filter first (7B -> ~tens of M), then
+    # parse columns on survivors only. No Python UDFs — map_elements breaks
+    # streaming and OOM-killed the 113GB days.
+    source = raw
+    filtered = None
+    if raw.suffix == ".gz" and raw.stat().st_size > 2_000_000_000:
+        filtered = raw.with_suffix(".filtered.csv")
+        _shell_prefilter(raw, filtered, roots)
+        source = filtered
+    prefixes = tuple(f"O:{r}" for r in sorted(roots, key=len, reverse=True))
+    keep = pl.any_horizontal([pl.col("ticker").str.starts_with(p) for p in prefixes])
+    tick_len = pl.col("ticker").str.len_chars()
     lf = (
-        lf.with_columns(
-            pl.col("ticker")
-            .map_elements(root_of, return_dtype=pl.Utf8)
-            .alias("root")
-        )
-        .filter(pl.col("root").is_in(list(roots)))
+        pl.scan_csv(source, infer_schema_length=10_000)
+        .filter(keep)
         .with_columns(
-            # tail slicing mirrors symbols.parse_option_ticker
+            pl.col("ticker").str.slice(2, tick_len - 17).alias("root"),
             pl.col("ticker").str.slice(-15, 6).str.strptime(pl.Date, "%y%m%d").alias("expiry"),
             pl.col("ticker").str.slice(-9, 1).alias("right"),
             (pl.col("ticker").str.slice(-8, 8).cast(pl.Int64) / 1000.0).alias("strike"),
         )
+        .filter(pl.col("root").is_in(list(roots)))
     )
     out.parent.mkdir(parents=True, exist_ok=True)
     lf.sink_parquet(out, compression="zstd", statistics=True)
+    if filtered is not None:
+        filtered.unlink(missing_ok=True)
     return pl.scan_parquet(out).select(pl.len()).collect().item()
 
 
@@ -94,6 +120,8 @@ def _filter_index_day(raw: Path, out: Path, tickers: list[str]) -> int:
     )
     out.parent.mkdir(parents=True, exist_ok=True)
     lf.sink_parquet(out, compression="zstd", statistics=True)
+    if filtered is not None:
+        filtered.unlink(missing_ok=True)
     return pl.scan_parquet(out).select(pl.len()).collect().item()
 
 
