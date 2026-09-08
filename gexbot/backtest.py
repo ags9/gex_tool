@@ -47,7 +47,10 @@ def run_backtest(start: dt.date, end: dt.date, *, tranche: float = 3000.0,
         if d.weekday() < 5:
             try:
                 day = rb.build(d)
-                sim = DaySimulator(SimConfig(tranche=tranche),
+                import os as _os
+                from .entries import EntryParams
+                _ep = EntryParams(breakout_only=_os.getenv("GEX_BREAKOUT_ONLY") == "1")
+                sim = DaySimulator(SimConfig(tranche=tranche), entry_params=_ep,
                                    providers=day.providers)
                 res = sim.run(day.bars)
                 results.append(res)

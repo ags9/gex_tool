@@ -23,6 +23,7 @@ class EntryParams:
     # C.11
     reversal_enable_score: int = 70
     reversal_veto_score: int = 30
+    breakout_only: bool = False
     selloff_threshold_pct: float = 0.0075   # score computed when down >= 0.75%
 
 
@@ -101,9 +102,13 @@ class EntryEngine:
         veto_calls = score is not None and score <= self.p.reversal_veto_score
 
         candidates: list[EntrySignal] = []
+        # EXPERIMENT (⚙ breakout_only): disable mean-reversion books to test
+        # the four-year finding that breakout is the only consistently green
+        # strategy. Set via EntryParams; default False keeps full behavior.
+        _bo = getattr(self.p, "breakout_only", False)
 
         # C.4a bounce (REGIME_P): pullback to support + confirmed bounce bar
-        if m.regime == "P" and m.bar_close_above_level:
+        if (not _bo) and m.regime == "P" and m.bar_close_above_level:
             for lvl in (m.put_wall, m.g_max):
                 if lvl is not None and lvl < m.spot and self._near(m.spot, lvl, self.p.level_proximity_pct):
                     kind = "reversal" if (score is not None and score >= self.p.reversal_enable_score) else "bounce"
