@@ -22,6 +22,7 @@ from pathlib import Path
 import polars as pl
 
 from .daysim import Providers
+from .marks_rest import MarkFetcher, occ_ticker
 from .ledger import (BaselineModel, BlockFlowTracker, Ledger, classify_trade)
 from .synth import BAR_MIN, SESSION_START, Bar
 
@@ -82,6 +83,10 @@ class ReplayBuilder:
         self.spx_roots = spx_roots
         self.baseline = baseline
         self.level_refresh_bars = level_refresh_bars
+        self.mark_fetcher: MarkFetcher | None = None
+        self.fallback_marks = 0
+        self.rest_marks = 0
+        self.file_marks = 0
 
     # ── loaders ──────────────────────────────────────────────────────
     def _read(self, dataset: str, day: dt.date) -> pl.DataFrame | None:
@@ -177,6 +182,9 @@ class ReplayBuilder:
 
         out: list[tuple] = []
         cached = None
+        regimes: list[str] = []
+        run_scale = 1.0
+        _pending = None; _pend_n = 0; _current = "X"
         for i, b in enumerate(bars):
             led.spot = b.close
             for strike, right, size, side in flow_by_bar.get(i, []):
@@ -190,11 +198,28 @@ class ReplayBuilder:
                 lv = led.levels()
                 cached = (lv["put_wall"], lv["call_wall"], lv["g_max"])
             out.append(cached)
+            net = led.net_gex()
+            run_scale = max(run_scale, abs(net))
+            cand = "X" if abs(net) < 0.05 * run_scale else ("P" if net > 0 else "N")
+            if cand == _current:
+                _pending, _pend_n = None, 0
+            elif cand == _pending:
+                _pend_n += 1
+                if _pend_n >= (1 if cand == "N" else 2):
+                    _current, _pending, _pend_n = cand, None, 0
+            else:
+                _pending, _pend_n = cand, 1
+            regimes.append(_current)
+        self._last_regimes = regimes
         return out, blocks
 
     # ── assemble a full replay day ───────────────────────────────────
     def build(self, day: dt.date, *, oi_path: Path | None = None) -> ReplayDay:
         bars = self.spx_bars(day)
+        if len(bars) < 12:
+            # holiday / half-session / stray after-hours prints: not a
+            # replayable session. Same treatment as a missing file.
+            raise FileNotFoundError(f"{day}: only {len(bars)} session bars")
         levels, blocks = self.levels_by_bar(day, bars, oi_path=oi_path)
         quotes_lf = self._scan("opra_quotes", day)
 
@@ -211,6 +236,16 @@ class ReplayBuilder:
         if expiries:
             candidates = [e for e in expiries if (e - day).days >= 3]
             target_expiry = candidates[0] if candidates else expiries[-1]
+        else:
+            # No whole-market quote file for this day (the normal case): pick
+            # the expiry by CALENDAR rule instead, so REST marks still work.
+            # XSP lists Mon/Wed/Fri expiries; C.2 wants 3-4 DTE.
+            d = day + dt.timedelta(days=3)
+            for _ in range(7):
+                if d.weekday() in (0, 2, 4):      # Mon/Wed/Fri
+                    target_expiry = d
+                    break
+                d += dt.timedelta(days=1)
 
         def mark_fn(spot: float, strike: float, minute: int, right: str):
             key = (strike, right)
@@ -227,8 +262,20 @@ class ReplayBuilder:
             book = books.get(key)
             m = book.mark(minute) if book else None
             if m is not None:
+                self.file_marks += 1
                 return m
+            # 2) REST per-contract NBBO (cached) — real fills without the
+            #    100 GB/day whole-market quote files
+            if self.mark_fetcher is not None and target_expiry is not None:
+                tkr = occ_ticker(self.xsp_root, target_expiry, right, strike)
+                cq = self.mark_fetcher.get(tkr, day)
+                if cq is not None:
+                    m2 = cq.mark(minute)
+                    if m2 is not None:
+                        self.rest_marks += 1
+                        return m2
             # fallback: BS mark (contract had no quotes — flagged for audit)
+            self.fallback_marks += 1
             from . import greeks
             t = max(4 / 252 - (minute - SESSION_START) / (390.0 * 252.0), 1e-6)
             return float(greeks.price(spot / 10.0, strike, t, 0.16, right)), 0.10
@@ -237,6 +284,7 @@ class ReplayBuilder:
             return levels[min(i, len(levels) - 1)]
 
         return ReplayDay(day=day, bars=bars,
-                         providers=Providers(mark_fn=mark_fn, levels_fn=levels_fn),
+                         providers=Providers(mark_fn=mark_fn, levels_fn=levels_fn,
+                                             regimes=getattr(self, '_last_regimes', None)),
                          block_flow_by_bar=blocks.by_bar,
                          block_flow_near_level_by_bar=blocks.near_level_by_bar)

@@ -25,7 +25,18 @@ console = Console()
 
 def run_backtest(start: dt.date, end: dt.date, *, tranche: float = 3000.0,
                  out_dir: Path | None = None) -> dict:
-    rb = ReplayBuilder(settings.gex_parquet_dir)          # type: ignore[arg-type]
+    from dotenv import load_dotenv
+    load_dotenv()
+    import os
+    from .marks_rest import MarkFetcher
+
+    rb = ReplayBuilder(settings.gex_parquet_dir)
+    api_key = os.getenv("MASSIVE_API_KEY", "")
+    if api_key and api_key != "your_key_here":
+        rb.mark_fetcher = MarkFetcher(
+            Path(settings.gex_parquet_dir) / "rest_marks", api_key)
+    else:
+        console.print("[yellow]No MASSIVE_API_KEY — marks fall back to model prices")          # type: ignore[arg-type]
     out_dir = out_dir or (settings.gex_data_root / "results" /  # type: ignore[operator]
                           f"{dt.datetime.now():%Y%m%d_%H%M}_{start}_{end}")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -83,6 +94,14 @@ def run_backtest(start: dt.date, end: dt.date, *, tranche: float = 3000.0,
             "profit_factor": round(wins / losses, 2) if losses else float("inf"),
             "halt_days": int(g["halted"].sum()),
         })
+
+    total_marks = rb.file_marks + rb.rest_marks + rb.fallback_marks
+    if total_marks:
+        pct = 100.0 * rb.fallback_marks / total_marks
+        colour = "green" if pct < 5 else ("yellow" if pct < 25 else "red")
+        console.print(f"[{colour}]Mark provenance — file: {rb.file_marks:,}  "
+                      f"REST: {rb.rest_marks:,}  model-fallback: {rb.fallback_marks:,} "
+                      f"({pct:.1f}%)")
 
     summary = _render(start, end, rep_is, rep_oos, gates, era_rows,
                       skipped, out_dir)

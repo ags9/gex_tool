@@ -67,6 +67,8 @@ def main() -> None:
     ir.add_argument("--start", type=dt.date.fromisoformat, default=settings.gex_start_date)
     ir.add_argument("--end", type=dt.date.fromisoformat, default=settings.end_date)
 
+    sub.add_parser("explore", help="launch the results explorer UI (Streamlit, localhost)")
+
     args = p.parse_args()
     if args.cmd == "status":
         _summary(Manifest(settings.gex_manifest_db))  # type: ignore[arg-type]
@@ -86,6 +88,14 @@ def main() -> None:
     elif args.cmd == "backtest":
         from .backtest import run_backtest
         run_backtest(args.start, args.end, tranche=args.tranche)
+    elif args.cmd == "explore":
+        import subprocess, sys
+        from pathlib import Path as _P
+        app = _P(__file__).parent / "explore.py"
+        subprocess.run([sys.executable, "-m", "streamlit", "run", str(app),
+                        "--server.port", str(settings.gex_dashboard_port),
+                        "--server.address", "127.0.0.1",
+                        "--browser.gatherUsageStats", "false"])
     elif args.cmd == "index-rest":
         from dotenv import load_dotenv  # type: ignore
         load_dotenv()

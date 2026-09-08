@@ -2,13 +2,16 @@ README.md
 pyproject.toml
 gexbot/__init__.py
 gexbot/__main__.py
+gexbot/backtest.py
 gexbot/config.py
 gexbot/costs.py
 gexbot/daysim.py
 gexbot/discipline.py
 gexbot/entries.py
 gexbot/exits.py
+gexbot/explore.py
 gexbot/greeks.py
+gexbot/index_rest.py
 gexbot/ledger.py
 gexbot/manifest.py
 gexbot/metrics.py
