@@ -69,6 +69,28 @@ def main() -> None:
 
     sub.add_parser("explore", help="launch the results explorer UI (Streamlit, localhost)")
 
+    ct = sub.add_parser("control", help="null-model test: does the GEX entry beat random?")
+    ct.add_argument("--start", type=dt.date.fromisoformat, required=True)
+    ct.add_argument("--end", type=dt.date.fromisoformat, required=True)
+    ct.add_argument("--seeds", type=int, default=20)
+    ct.add_argument("--tranche", type=float, default=3000.0)
+
+    pa = sub.add_parser("parity", help="reconstruct SPX spot from option trades (2021-22 out-of-sample)")
+    pa.add_argument("--start", type=dt.date.fromisoformat, required=True)
+    pa.add_argument("--end", type=dt.date.fromisoformat, required=True)
+    pa.add_argument("--overwrite", action="store_true",
+                    help="rebuild days that already have index data")
+
+    sw = sub.add_parser("sweep", help="run a parameter sweep and report the gate frontier")
+    sw.add_argument("--start", type=dt.date.fromisoformat, required=True)
+    sw.add_argument("--end", type=dt.date.fromisoformat, required=True)
+    sw.add_argument("--param", required=True,
+                    help="e.g. premium_budget_frac | trail_atr_mult | pt1_pct | hard_stop_pct")
+    sw.add_argument("--values", required=True, help="comma-separated, e.g. 0.15,0.20,0.30")
+    sw.add_argument("--tranche", type=float, default=3000.0)
+    sw.add_argument("--full-strategy", action="store_true",
+                    help="sweep with all books enabled (default: breakout-only)")
+
     args = p.parse_args()
     if args.cmd == "status":
         _summary(Manifest(settings.gex_manifest_db))  # type: ignore[arg-type]
@@ -88,6 +110,17 @@ def main() -> None:
     elif args.cmd == "backtest":
         from .backtest import run_backtest
         run_backtest(args.start, args.end, tranche=args.tranche)
+    elif args.cmd == "sweep":
+        from .sweep import run_sweep
+        run_sweep(args.start, args.end, args.param,
+                  [float(v) for v in args.values.split(",")],
+                  tranche=args.tranche, breakout_only=not args.full_strategy)
+    elif args.cmd == "parity":
+        from .parity import backfill_parity
+        backfill_parity(args.start, args.end, overwrite=args.overwrite)
+    elif args.cmd == "control":
+        from .control import run_control
+        run_control(args.start, args.end, seeds=args.seeds, tranche=args.tranche)
     elif args.cmd == "explore":
         import subprocess, sys
         from pathlib import Path as _P
