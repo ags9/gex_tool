@@ -151,10 +151,13 @@ def main() -> None:
         from dotenv import load_dotenv  # type: ignore
         load_dotenv()
         from .watch import run_watch
-        run_watch(underlying=args.underlying, interval=args.interval,
+        try:
+            run_watch(underlying=args.underlying, interval=args.interval,
                   expiries=args.expiries, window=args.window,
                   tranche=args.tranche, shadow=not args.no_shadow,
-                  once=args.once)
+                      once=args.once)
+        except KeyboardInterrupt:
+            console.print("\n[yellow]watch stopped (state saved).")
     elif args.cmd == "explore":
         import subprocess, sys
         from pathlib import Path as _P

@@ -141,6 +141,17 @@ def build_profile(contracts: list[dict], spot: float, *,
     }
 
 
+def level_label(gamma_at_strike: float, below_spot: bool) -> str:
+    """Name a level by what dealer hedging actually does there.
+
+    positive gamma -> dealers lean against moves -> support / resistance
+    negative gamma -> dealers amplify moves      -> trapdoor / launchpad
+    """
+    if gamma_at_strike > 0:
+        return "SUPPORT" if below_spot else "RESISTANCE"
+    return "TRAPDOOR" if below_spot else "LAUNCHPAD"
+
+
 def render(p: dict, model: str) -> None:
     if not p:
         console.print("[red]No chain data returned — check entitlement/underlying.")
@@ -169,13 +180,20 @@ def render(p: dict, model: str) -> None:
 
     ordered = sorted(p["by_strike"].items(), key=lambda kv: -kv[0])
     peak = max(abs(v) for _, v in ordered) or 1.0
-    notes = {
-        p["max_magnet"]: "MAX MAGNET",
-        p["max_accel"]: "MAX ACCEL",
-        p["put_wall"]: "PUT WALL",
-        p["call_wall"]: "CALL WALL",
-        p["first_positive_above"]: "first positive above",
-    }
+    bs = p["by_strike"]
+    notes = {}
+    if p.get("max_magnet"):
+        notes[p["max_magnet"]] = "MAX MAGNET (pins)"
+    if p.get("max_accel"):
+        notes[p["max_accel"]] = "MAX ACCELERATOR (amplifies)"
+    if p.get("put_wall"):
+        k = p["put_wall"]
+        notes.setdefault(k, f"largest below — {level_label(bs.get(k, 0), True)}")
+    if p.get("call_wall"):
+        k = p["call_wall"]
+        notes.setdefault(k, f"largest above — {level_label(bs.get(k, 0), False)}")
+    if p.get("first_positive_above"):
+        notes.setdefault(p["first_positive_above"], "first positive gamma above")
     for k, v in ordered:
         if abs(v) < peak * 0.04:
             continue

@@ -63,6 +63,9 @@ class WatchState:
     day: str = ""
     last_regime: str = ""
     last_side_of_flip: str = ""
+    pending_flip_side: str = ""
+    pending_flip_count: int = 0
+    last_flip_alert_ts: float = 0.0
     alerted_levels: dict = field(default_factory=dict)
     posted_open_map: bool = False
     open_trade: dict | None = None
@@ -127,12 +130,90 @@ def contract_price(underlying: str, strike: float, right: str,
 
 
 # ── alert composition ────────────────────────────────────────────────
+FLIP_HYSTERESIS = 0.0015      # 0.15% band around the flip
+FLIP_CONFIRM_POLLS = 2        # must hold for two consecutive polls
+FLIP_COOLDOWN_S = 3600        # at most one flip alert per hour
+
+
+def flip_context(side: str) -> str:
+    """Regime implication of spot's position relative to the flip — NOT the
+    net-GEX sign, which can disagree near the boundary."""
+    if side == "above":
+        return ("Above the flip: dealers net long gamma, hedging dampens "
+                "moves — ranges tend to hold, breakouts tend to fail.")
+    return ("Below the flip: dealers net short gamma, hedging amplifies "
+            "moves — levels break more easily and moves extend.")
+
+
 def regime_context(net: float) -> str:
     if net > 0:
         return ("Positive gamma: dealer hedging dampens moves — ranges tend "
                 "to hold, breakouts tend to fail.")
     return ("Negative gamma: dealer hedging amplifies moves — levels break "
             "more easily and moves extend.")
+
+
+def _level_lines(prof: dict) -> str:
+    """Label levels by what hedging DOES there, not by convention."""
+    from .levels import level_label
+    bs = prof.get("by_strike") or {}
+    spot = prof["spot"]
+    out = []
+    for key, below in (("put_wall", True), ("call_wall", False)):
+        k = prof.get(key)
+        if not k:
+            continue
+        g = bs.get(k, 0.0)
+        lab = level_label(g, below)
+        out.append(f"**{k:,.0f}** {fmt_m(g)} — {lab} "
+                   f"({abs(spot-k)/spot*100:.1f}% {'below' if below else 'above'})")
+    if prof.get("max_accel"):
+        k = prof["max_accel"]
+        out.append(f"**{k:,.0f}** {fmt_m(bs.get(k,0))} — MAX ACCELERATOR "
+                   f"(hedging amplifies moves here)")
+    if prof.get("max_magnet"):
+        k = prof["max_magnet"]
+        out.append(f"**{k:,.0f}** {fmt_m(bs.get(k,0))} — MAX MAGNET "
+                   f"(hedging pins price here)")
+    if prof.get("first_positive_above"):
+        k = prof["first_positive_above"]
+        out.append(f"**{k:,.0f}** — first positive gamma above spot "
+                   f"({(k-spot)/spot*100:.1f}% away)")
+    return "\n".join(out) + "\n\n"
+
+
+def position_footer(prof: dict, st: "WatchState") -> str:
+    """What the shadow book is holding — and if flat, the blocking reason.
+    Appended to every structural alert so no message leaves you guessing."""
+    spot, net = prof["spot"], prof["net"]
+    t = st.open_trade
+    if t:
+        held = (f"{t['contracts']}× SPX {t['strike']:,.0f}"
+                f"{'C' if t['direction'] > 0 else 'P'} exp {t['expiry']}")
+        return (f"\n\n**📄 Shadow position:** {held} @ ${t['entry_premium']:.2f}"
+                f"\nEntered {t['opened_at']} · spot then {t['entry_spot']:,.0f}"
+                f" (now {spot:,.0f}) · trigger level {t['level']:,.0f}")
+
+    # flat — say why no entry is possible right now
+    m = minute_now()
+    if net >= 0:
+        why = f"net gamma positive ({fmt_m(net)}); breakout book needs negative"
+    elif m < SESSION_OPEN + 15:
+        why = "inside the opening 15 minutes"
+    elif m > 14 * 60 + 30:
+        why = "past the 14:30 entry cutoff"
+    else:
+        pw, cw = prof.get("put_wall"), prof.get("call_wall")
+        if pw and cw:
+            why = (f"spot inside the walls ({pw:,.0f}–{cw:,.0f}); "
+                   f"entry needs a break beyond one")
+        else:
+            why = "no wall structure in the current window"
+    done = ""
+    if st.closed_trades:
+        done = (f" · {len(st.closed_trades)} closed today, "
+                f"shadow P&L ${st.shadow_pnl:+,.0f}")
+    return f"\n\n**📄 Shadow position:** flat — {why}{done}"
 
 
 def post_map(n: DiscordNotifier, prof: dict) -> None:
@@ -145,10 +226,7 @@ def post_map(n: DiscordNotifier, prof: dict) -> None:
            f"Today's gamma map — SPX {spot:,.0f}",
            f"**Net GEX:** {fmt_m(net)}   "
            f"**Flip:** {f'{flip:,.0f}' if flip else 'none in window'}\n"
-           f"**Put wall:** {prof.get('put_wall') or 0:,.0f}   "
-           f"**Call wall:** {prof.get('call_wall') or 0:,.0f}\n"
-           f"**Max accel:** {prof.get('max_accel') or 0:,.0f}   "
-           f"**Max magnet:** {prof.get('max_magnet') or 0:,.0f}\n\n"
++ _level_lines(prof) +
            "Largest gamma strikes:\n" + "\n".join(lines) + "\n\n"
            + regime_context(net),
            Color.BLUE)
@@ -166,29 +244,71 @@ def structural_alerts(n: DiscordNotifier, prof: dict, st: WatchState) -> None:
                [("spot", f"{spot:,.0f}"), ("flip", f"{flip:,.0f}" if flip else "—")])
     st.last_regime = regime
 
-    # flip crossing
+    # flip crossing — needs distance (hysteresis), persistence, and a cooldown.
+    # Without these the flip drifts with spot and the side oscillates on noise.
     if flip:
-        side = "above" if spot > flip else "below"
-        if st.last_side_of_flip and side != st.last_side_of_flip:
-            n.send(Channel.ALERTS, f"Spot crossed {side} the gamma flip",
-                   f"Spot {spot:,.0f} is now {side} flip {flip:,.0f}.\n"
-                   f"{regime_context(net)}", Color.AMBER)
-        st.last_side_of_flip = side
+        band = flip * FLIP_HYSTERESIS          # ~0.15% ≈ 10 SPX points
+        if spot > flip + band:
+            side = "above"
+        elif spot < flip - band:
+            side = "below"
+        else:
+            side = ""                          # inside the dead zone: no call
 
-    # proximity to significant strikes
-    for label, k in (("put wall", prof.get("put_wall")),
-                     ("call wall", prof.get("call_wall")),
-                     ("max accelerator", prof.get("max_accel")),
-                     ("max magnet", prof.get("max_magnet"))):
-        if not k:
-            continue
+        if not side or side == st.last_side_of_flip:
+            st.pending_flip_side, st.pending_flip_count = "", 0
+        elif side == st.pending_flip_side:
+            st.pending_flip_count += 1
+            if st.pending_flip_count >= FLIP_CONFIRM_POLLS:
+                if time.time() - st.last_flip_alert_ts > FLIP_COOLDOWN_S:
+                    n.send(Channel.ALERTS,
+                           f"Spot crossed {side} the gamma flip",
+                           f"Spot {spot:,.0f} vs flip {flip:,.0f} "
+                           f"({abs(spot-flip)/flip*100:.2f}% {side}).\n"
+                           f"{flip_context(side)}"
+                           + position_footer(prof, st), Color.AMBER)
+                    st.last_flip_alert_ts = time.time()
+                st.last_side_of_flip = side
+                st.pending_flip_side, st.pending_flip_count = "", 0
+        else:
+            st.pending_flip_side, st.pending_flip_count = side, 1
+
+    # proximity to significant strikes — ONE alert per strike, labelled by
+    # what hedging does there (gamma sign), not by convention.
+    from .levels import level_label
+    bs = prof["by_strike"]
+    roles: dict[float, list[str]] = {}
+    for role, k in (("largest below spot", prof.get("put_wall")),
+                    ("largest above spot", prof.get("call_wall")),
+                    ("max accelerator", prof.get("max_accel")),
+                    ("max magnet", prof.get("max_magnet"))):
+        if k:
+            roles.setdefault(float(k), []).append(role)
+
+    for k, role_list in roles.items():
         dist = abs(spot - k) / spot
-        key = f"{label}:{k:.0f}"
+        key = f"{k:.0f}"
         if dist <= 0.002 and st.alerted_levels.get(key) != "near":
-            gv = prof["by_strike"].get(k, 0.0)
-            n.send(Channel.ALERTS, f"Spot at {label} {k:,.0f}",
-                   f"Spot {spot:,.0f}, {dist*100:.2f}% away. "
-                   f"Strike gamma {fmt_m(gv)}.\n{regime_context(net)}",
+            gv = bs.get(k, 0.0)
+            below = k < spot
+            lab = level_label(gv, below)
+            pts = abs(spot - k)
+            local = ("Negative gamma at this strike: hedging AMPLIFIES moves "
+                     "through it." if gv < 0 else
+                     "Positive gamma at this strike: hedging DAMPENS moves, "
+                     "pinning price nearby.")
+            mismatch = ""
+            if (gv < 0) != (net < 0):
+                mismatch = (f"\nNet GEX is {'positive' if net > 0 else 'negative'} "
+                            f"overall ({fmt_m(net)}) — this strike is a local "
+                            f"{'pocket of amplification' if gv < 0 else 'pocket of damping'}.")
+            n.send(Channel.ALERTS,
+                   f"Spot approaching {k:,.0f} — {lab}",
+                   f"Spot {spot:,.0f}, {pts:.0f} pts "
+                   f"{'above' if below else 'below'}. "
+                   f"Strike gamma {fmt_m(gv)}  ·  {', '.join(role_list)}.\n"
+                   f"{local}{mismatch}"
+                   + position_footer(prof, st),
                    Color.BLUE)
             st.alerted_levels[key] = "near"
         elif dist > 0.004:
