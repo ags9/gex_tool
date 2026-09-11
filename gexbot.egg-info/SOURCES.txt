@@ -4,6 +4,7 @@ gexbot/__init__.py
 gexbot/__main__.py
 gexbot/backtest.py
 gexbot/config.py
+gexbot/control.py
 gexbot/costs.py
 gexbot/daysim.py
 gexbot/discipline.py
@@ -13,13 +14,19 @@ gexbot/explore.py
 gexbot/greeks.py
 gexbot/index_rest.py
 gexbot/ledger.py
+gexbot/levels.py
+gexbot/livefeed.py
 gexbot/manifest.py
+gexbot/marks_rest.py
 gexbot/metrics.py
 gexbot/notify.py
+gexbot/parity.py
 gexbot/pipeline.py
 gexbot/replay.py
+gexbot/sweep.py
 gexbot/symbols.py
 gexbot/synth.py
+gexbot/watch.py
 gexbot.egg-info/PKG-INFO
 gexbot.egg-info/SOURCES.txt
 gexbot.egg-info/dependency_links.txt

@@ -163,3 +163,47 @@ def test_replay_exposes_block_flow(parquet_root):
     rb = ReplayBuilder(parquet_root)
     day = rb.build(DAY)
     assert day.block_flow_by_bar is not None   # measured and carried on the day
+
+
+# ── live feed tests ──────────────────────────────────────────────────
+
+def test_tick_rule_classifier():
+    from gexbot.livefeed import TickRuleClassifier
+    c = TickRuleClassifier()
+    assert c.classify("A", 5.00) == 0      # first print: direction unknown
+    assert c.classify("A", 5.10) == 1      # uptick  = customer buy
+    assert c.classify("A", 5.05) == -1     # downtick = customer sell
+    assert c.classify("A", 5.05) == -1     # zero-tick inherits last side
+    assert c.classify("B", 2.00) == 0      # per-contract state
+
+
+def test_flow_ledger_sign_convention():
+    """Customer buying makes DEALERS SHORT gamma. This sign error would
+    invert every regime call, so it gets its own test."""
+    from gexbot.livefeed import FlowLedger
+    led = FlowLedger()
+    led.add(7600.0, size=100, side=1, gamma=0.0008, spot=7600.0)
+    assert led.net() < 0
+    led.add(7600.0, size=100, side=-1, gamma=0.0008, spot=7600.0)
+    assert abs(led.net()) < 1e-6          # equal buy + sell nets flat
+    assert led.trades_seen == 2 and led.contracts_seen == 200
+
+
+def test_combine_recomputes_levels_from_flow():
+    """Today's flow must be able to re-rank the walls — that is the whole
+    point of the overlay."""
+    from gexbot.livefeed import combine
+    oi = {"spot": 7600.0, "net": -25e6,
+          "by_strike": {7550.0: -30e6, 7580.0: -20e6, 7700.0: +25e6}}
+    flow = {7580.0: -40e6, 7650.0: -15e6}
+    m = combine(oi, flow)
+    assert m["by_strike"][7580.0] == -60e6            # summed, not replaced
+    assert m["put_wall"] == 7580.0                    # flow moved the wall
+    assert m["oi_net"] == -25e6 and m["flow_net"] == -55e6
+    assert abs(m["net"] - (-30 - 60 + 25 - 15) * 1e6) < 1e-6
+
+
+def test_option_ticker_parse_live():
+    from gexbot.livefeed import _parse
+    assert _parse("O:SPXW260911C07600000") == ("SPXW", "260911", "C", 7600.0)
+    assert _parse("garbage") is None

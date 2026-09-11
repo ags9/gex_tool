@@ -69,6 +69,26 @@ def main() -> None:
 
     sub.add_parser("explore", help="launch the results explorer UI (Streamlit, localhost)")
 
+    wt = sub.add_parser("watch", help="market-hours structural alerts + shadow trade narration")
+    wt.add_argument("--underlying", default="I:SPX")
+    wt.add_argument("--interval", type=int, default=180, help="seconds between polls")
+    wt.add_argument("--expiries", type=int, default=2)
+    wt.add_argument("--window", type=float, default=0.06)
+    wt.add_argument("--tranche", type=float, default=3000.0)
+    wt.add_argument("--no-shadow", action="store_true",
+                    help="structural alerts only, no shadow trades")
+    wt.add_argument("--once", action="store_true", help="single poll then exit (test)")
+
+    lv = sub.add_parser("levels", help="print today's GEX map (chain snapshot)")
+    lv.add_argument("--underlying", default="I:SPX")
+    lv.add_argument("--model", choices=["naive", "short_all"], default="naive")
+    lv.add_argument("--expiries", type=int, default=2,
+                    help="how many nearest expiries to aggregate")
+    lv.add_argument("--per-1pct", action="store_true",
+                    help="quote $GEX per 1%% move instead of per point")
+    lv.add_argument("--window", type=float, default=0.06,
+                    help="strike window as fraction of spot")
+
     ct = sub.add_parser("control", help="null-model test: does the GEX entry beat random?")
     ct.add_argument("--start", type=dt.date.fromisoformat, required=True)
     ct.add_argument("--end", type=dt.date.fromisoformat, required=True)
@@ -121,6 +141,20 @@ def main() -> None:
     elif args.cmd == "control":
         from .control import run_control
         run_control(args.start, args.end, seeds=args.seeds, tranche=args.tranche)
+    elif args.cmd == "levels":
+        from dotenv import load_dotenv  # type: ignore
+        load_dotenv()
+        from .levels import show_levels
+        show_levels(args.underlying, args.model, args.expiries, args.window,
+                    per_point=not args.per_1pct)
+    elif args.cmd == "watch":
+        from dotenv import load_dotenv  # type: ignore
+        load_dotenv()
+        from .watch import run_watch
+        run_watch(underlying=args.underlying, interval=args.interval,
+                  expiries=args.expiries, window=args.window,
+                  tranche=args.tranche, shadow=not args.no_shadow,
+                  once=args.once)
     elif args.cmd == "explore":
         import subprocess, sys
         from pathlib import Path as _P

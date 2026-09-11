@@ -5,6 +5,7 @@ numpy>=1.26
 pydantic>=2.7
 pydantic-settings>=2.3
 httpx>=0.27
+websockets>=12.0
 rich>=13.0
 python-dotenv>=1.0
 streamlit>=1.36

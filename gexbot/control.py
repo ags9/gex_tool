@@ -94,7 +94,10 @@ def run_control(start: dt.date, end: dt.date, *, seeds: int = 20,
     if not days:
         return
 
-    ep = entry_params or EntryParams(breakout_only=True)
+    # honour the env flag so the "strict / full strategy" arm can actually run
+    _bo = os.getenv("GEX_BREAKOUT_ONLY") == "1"
+    ep = entry_params or EntryParams(breakout_only=_bo)
+    console.print(f"[bold]Entry mode: {'breakout-only' if _bo else 'FULL STRATEGY (all books)'}")
     xp = exit_params or CParams()
 
     # ── arm 1: the real strategy (deterministic, one run) ────────────
@@ -119,7 +122,9 @@ def run_control(start: dt.date, end: dt.date, *, seeds: int = 20,
 
     for arm in ARMS[1:]:
         for seed in range(seeds):
-            rng = random.Random(hash((arm, seed)) & 0xFFFFFFFF)
+            # zlib.crc32 is stable across processes; hash() is randomized
+            import zlib
+            rng = random.Random(zlib.crc32(f"{arm}:{seed}".encode()))
             trades, pnl = [], 0.0
 
             # shuffled-levels arm: rotate level providers between days
