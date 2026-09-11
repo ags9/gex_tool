@@ -15,10 +15,16 @@ from rich.table import Table
 
 from .config import settings
 from .manifest import Manifest
+from .metrics import GateParams
 from .pipeline import KEYS, _s3_client, free_space_gb, process_day, trading_days
 
 console = Console()
 MIN_FREE_GB = 200  # halt if the drive gets this low; one raw quotes day can be huge
+DD_HELP = (
+    "OOS max-drawdown gate threshold as a fraction. Default is the GateParams "
+    "default (%(default)s); round-two evidence runs pass 0.20 per "
+    "PREREGISTRATION section 4. Recorded in the results bundle."
+)
 
 
 def backfill(datasets: list[str], start: dt.date, end: dt.date) -> None:
@@ -62,6 +68,8 @@ def main() -> None:
     bt.add_argument("--start", type=dt.date.fromisoformat, required=True)
     bt.add_argument("--end", type=dt.date.fromisoformat, required=True)
     bt.add_argument("--tranche", type=float, default=3000.0)
+    bt.add_argument("--max-dd", type=float, default=GateParams().max_drawdown_frac,
+                    help=DD_HELP)
 
     ir = sub.add_parser("index-rest", help="fast index backfill via REST aggregates (no 2.3GB flat files)")
     ir.add_argument("--start", type=dt.date.fromisoformat, default=settings.gex_start_date)
@@ -110,6 +118,8 @@ def main() -> None:
     sw.add_argument("--tranche", type=float, default=3000.0)
     sw.add_argument("--full-strategy", action="store_true",
                     help="sweep with all books enabled (default: breakout-only)")
+    sw.add_argument("--max-dd", type=float, default=GateParams().max_drawdown_frac,
+                    help=DD_HELP)
 
     args = p.parse_args()
     if args.cmd == "status":
@@ -129,12 +139,14 @@ def main() -> None:
         console.print(f"[green]Sent test messages to {len(n.webhooks)} configured channel(s).")
     elif args.cmd == "backtest":
         from .backtest import run_backtest
-        run_backtest(args.start, args.end, tranche=args.tranche)
+        run_backtest(args.start, args.end, tranche=args.tranche,
+                     max_dd=args.max_dd)
     elif args.cmd == "sweep":
         from .sweep import run_sweep
         run_sweep(args.start, args.end, args.param,
                   [float(v) for v in args.values.split(",")],
-                  tranche=args.tranche, breakout_only=not args.full_strategy)
+                  tranche=args.tranche, breakout_only=not args.full_strategy,
+                  max_dd=args.max_dd)
     elif args.cmd == "parity":
         from .parity import backfill_parity
         backfill_parity(args.start, args.end, overwrite=args.overwrite)

@@ -36,7 +36,11 @@ st.sidebar.caption(f"{len(bundles)} bundle(s) in {results_root}")
 
 days = pl.read_parquet(bundle / "days.parquet") if (bundle / "days.parquet").exists() else None
 trades = pl.read_parquet(bundle / "trades.parquet") if (bundle / "trades.parquet").exists() else None
-gates = json.loads((bundle / "gates.json").read_text()) if (bundle / "gates.json").exists() else {}
+_gj = json.loads((bundle / "gates.json").read_text()) if (bundle / "gates.json").exists() else {}
+# Bundles written before the --max-dd flag are flat {gate: {...}}; newer ones
+# nest under "gates" and carry the thresholds that judged the run.
+gates = _gj.get("gates", _gj)
+gate_params = _gj.get("gate_params", {})
 
 # ── headline stats ───────────────────────────────────────────────────
 if days is not None and days.height:
@@ -101,6 +105,15 @@ else:
 
 # ── gates ────────────────────────────────────────────────────────────
 st.subheader("§10 Gates")
+if gate_params:
+    st.caption(
+        f"Judged at: OOS maxDD <= {gate_params.get('max_drawdown_frac', 0):.1%} · "
+        f"OOS PF >= {gate_params.get('min_profit_factor_oos', '?')} · "
+        f"IS/OOS trades >= {gate_params.get('min_trades_is', '?')}/"
+        f"{gate_params.get('min_trades_oos', '?')}")
+else:
+    st.caption("Bundle predates threshold recording — judged at the GateParams "
+               "defaults of its day (OOS maxDD 12%).")
 for name, g in gates.items():
     icon = "✅" if g.get("passed") else "❌"
     st.write(f"{icon} **{name}** — {g.get('detail','')}")

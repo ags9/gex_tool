@@ -213,3 +213,32 @@ def test_option_ticker_parse_live():
     from gexbot.livefeed import _parse
     assert _parse("O:SPXW260911C07600000") == ("SPXW", "260911", "C", 7600.0)
     assert _parse("garbage") is None
+
+
+def test_backtest_bundle_records_the_threshold_that_judged_it(
+        parquet_root, tmp_path, monkeypatch):
+    """End-to-end: --max-dd reaches gates.json and summary.md. A bundle that
+    does not name its threshold cannot be compared against another one."""
+    import json
+
+    from gexbot import backtest as bt_mod
+
+    # keep the run offline: a real key would build a REST MarkFetcher
+    monkeypatch.setenv("MASSIVE_API_KEY", "your_key_here")
+    monkeypatch.setattr(bt_mod.settings, "gex_parquet_dir", parquet_root)
+
+    out = tmp_path / "bundle"
+    res = bt_mod.run_backtest(DAY, DAY, out_dir=out, max_dd=0.20)
+
+    blob = json.loads((out / "gates.json").read_text())
+    assert blob["gate_params"]["max_drawdown_frac"] == 0.20
+    assert "g3_max_drawdown" in blob["gates"]
+    assert res["gate_params"]["max_drawdown_frac"] == 0.20
+    assert "20.0%" in (out / "summary.md").read_text()
+
+    # and the default path still records 12%
+    out2 = tmp_path / "bundle_default"
+    bt_mod.run_backtest(DAY, DAY, out_dir=out2)
+    blob2 = json.loads((out2 / "gates.json").read_text())
+    assert blob2["gate_params"]["max_drawdown_frac"] == 0.12
+    assert "12.0%" in (out2 / "summary.md").read_text()

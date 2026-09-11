@@ -73,7 +73,7 @@ class BacktestReport:
             "g2_oos_profit_factor": (oos.profit_factor() >= p.min_profit_factor_oos,
                                      f"OOS PF {oos.profit_factor():.2f} vs {p.min_profit_factor_oos}"),
             "g3_max_drawdown": (oos.max_drawdown_frac <= p.max_drawdown_frac,
-                                f"OOS maxDD {oos.max_drawdown_frac:.1%} vs {p.max_drawdown_frac:.0%}"),
+                                f"OOS maxDD {oos.max_drawdown_frac:.1%} vs {p.max_drawdown_frac:.1%}"),
             "g4_clears_fixed_costs": (annualized > p.annual_fixed_costs,
                                       f"annualized ${annualized:,.0f} vs ${p.annual_fixed_costs:,.0f}"),
             "g5_not_concentrated": (self.pf_excluding_top(p.top_n_removed) >= p.min_pf_after_removal,

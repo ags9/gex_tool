@@ -52,7 +52,12 @@ def _build_days(start: dt.date, end: dt.date, rb: ReplayBuilder) -> list:
 
 
 def run_sweep(start: dt.date, end: dt.date, param: str, values: list[float],
-              *, tranche: float = 3000.0, breakout_only: bool = True) -> None:
+              *, tranche: float = 3000.0, breakout_only: bool = True,
+              max_dd: float | None = None) -> None:
+    """max_dd: the OOS max-drawdown threshold every grid point is judged at.
+    Defaults to GateParams' own 12%; round-two runs pass 0.20 per
+    PREREGISTRATION §4. Recorded per row so the saved parquet always says
+    which threshold produced its gates_passed count."""
     from dotenv import load_dotenv
     load_dotenv()
     from .marks_rest import MarkFetcher
@@ -63,6 +68,10 @@ def run_sweep(start: dt.date, end: dt.date, param: str, values: list[float],
         rb.mark_fetcher = MarkFetcher(
             Path(settings.gex_parquet_dir) / "rest_marks", key)   # type: ignore[operator]
 
+    gp_base = GateParams() if max_dd is None else GateParams(max_drawdown_frac=max_dd)
+    console.print(f"[bold]Gates judged at OOS maxDD <= "
+                  f"{gp_base.max_drawdown_frac:.1%}, OOS PF >= "
+                  f"{gp_base.min_profit_factor_oos}")
     console.print(f"[bold]Building days {start} → {end} (once, reused across grid)…")
     days = _build_days(start, end, rb)
     console.print(f"  {len(days)} replayable sessions\n")
@@ -90,7 +99,7 @@ def run_sweep(start: dt.date, end: dt.date, param: str, values: list[float],
 
         is_days, oos_days = walk_forward_split(results, oos_frac=0.25)
         rep_is, rep_oos = collect(is_days, tranche), collect(oos_days, tranche)
-        gates = rep_is.gates(rep_oos, GateParams())
+        gates = rep_is.gates(rep_oos, gp_base)
         net = sum(sum(r.pnl for r in results) for _ in (0,)) / 1
         rows.append({
             "value": v,
@@ -99,6 +108,7 @@ def run_sweep(start: dt.date, end: dt.date, param: str, values: list[float],
             "pf_all": round(rep_is.profit_factor(), 2),
             "pf_oos": round(rep_oos.profit_factor(), 2),
             "maxdd_oos": round(rep_oos.max_drawdown_frac * 100, 1),
+            "maxdd_gate": gp_base.max_drawdown_frac,
             "annualized": round(net * 252 / max(len(days), 1)),
             "gates_passed": sum(1 for k, g in gates.items()
                                 if k != "GO_LIVE_ELIGIBLE" and g[0]),
@@ -107,14 +117,15 @@ def run_sweep(start: dt.date, end: dt.date, param: str, values: list[float],
                     f"OOS PF {rows[-1]['pf_oos']} DD {rows[-1]['maxdd_oos']}%")
 
     t = Table(title=f"Sweep: {param}   ({start} → {end}, "
-                    f"{'breakout-only' if breakout_only else 'full strategy'})")
+                    f"{'breakout-only' if breakout_only else 'full strategy'}, "
+                    f"maxDD gate {gp_base.max_drawdown_frac:.1%})")
     for c in ("value", "trades", "net_pnl", "pf_all", "pf_oos",
-              "maxdd_oos", "annualized", "gates_passed"):
+              "maxdd_oos", "maxdd_gate", "annualized", "gates_passed"):
         t.add_column(c)
     for r in rows:
         t.add_row(*(str(r[c]) for c in
                     ("value", "trades", "net_pnl", "pf_all", "pf_oos",
-                     "maxdd_oos", "annualized", "gates_passed")))
+                     "maxdd_oos", "maxdd_gate", "annualized", "gates_passed")))
     console.print(t)
 
     # plateau check — the anti-overfit read

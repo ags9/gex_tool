@@ -55,7 +55,7 @@ forms."*
 ### What is nonetheless solid
 
 A pipeline that survives 7-billion-row days; ledgers, greeks, entry/exit/
-discipline engines (55 tests passing *(verify)*); honest REST NBBO marks
+discipline engines (62 tests passing *(verify)*); honest REST NBBO marks
 with provenance tracking; a backtest runner with era splits and executable
 gates; a four-arm control harness; put-call-parity spot reconstruction for
 pre-2023; Discord alerting; a results explorer. None of this is invalidated
@@ -225,9 +225,9 @@ All commands: `python -m gexbot <cmd>`. Dates are ISO (`2024-01-02`).
 | `status` | — | Print manifest summary (dataset/state/days/rows/GB). |
 | `index-rest` | `--start`, `--end` | Fast index backfill via REST aggregates instead of 2.3 GB/day flat files. Same output schema. |
 | `parity` | `--start`, `--end` (required), `--overwrite` | Reconstruct SPX spot from option trades via put-call parity — unlocks 2021–22. |
-| `backtest` | `--start`, `--end` (required), `--tranche` (3000) | Replay a range through Strategy C, report §10 gates, write a results bundle. |
+| `backtest` | `--start`, `--end` (required), `--tranche` (3000), `--max-dd` (0.12) | Replay a range through Strategy C, report §10 gates, write a results bundle. Round-two evidence runs pass `--max-dd 0.20` per prereg §4. |
 | `control` | `--start`, `--end` (required), `--seeds` (20), `--tranche` | **The Stage 1 test.** Null-model experiment: does the GEX entry beat random? |
-| `sweep` | `--start`, `--end`, `--param`, `--values` (required), `--tranche`, `--full-strategy` | Parameter grid → gate frontier. Breakout-only by default. Reports plateaus vs peaks. **Gated behind Stage 1.** |
+| `sweep` | `--start`, `--end`, `--param`, `--values` (required), `--tranche`, `--full-strategy`, `--max-dd` (0.12) | Parameter grid → gate frontier. Breakout-only by default. Reports plateaus vs peaks. **Gated behind Stage 1.** |
 | `levels` | `--underlying` (I:SPX), `--model {naive,short_all}`, `--expiries` (2), `--window` (0.06), `--per-1pct` | Print today's GEX map from a live chain snapshot. |
 | `watch` | `--underlying`, `--interval` (180s), `--expiries`, `--window`, `--tranche`, `--no-shadow`, `--once` | Market-hours structural alerts + shadow trade narration to Discord. REST snapshots, not the live engine. |
 | `explore` | — | Streamlit results explorer on `GEX_DASHBOARD_PORT`, bound 127.0.0.1. |
@@ -298,7 +298,7 @@ flat 15:50, max 3 trades/day (5 on range days), 2 losing trades ends the day,
 ```bash
 uv venv && source .venv/bin/activate && uv pip install -e ".[dev]"
 cp .env.example .env          # fill Massive keys + GEX_DATA_ROOT
-python -m pytest -q           # 55 passing
+python -m pytest -q           # 62 passing
 ruff check .                  # line-length 100
 ```
 
@@ -320,17 +320,26 @@ live), ports 8741/8742. **Never commit `.env`; never send creds anywhere.**
   validation failures. This file (§2) is currently the best substitute.
 - **`docs/RUNLOG.md` does not exist**, though prereg §5 makes it mandatory
   for every run. **Create it with the first round-two run.**
-- **Drawdown gate — decided 2026-09-11.** `metrics.py:GateParams` keeps its
-  **12%** default deliberately; it is the stricter number and it stays.
-  Round-two evidence runs are to be judged at the frozen §4 Stage-2
-  criterion of **20%**, passed explicitly as
-  `GateParams(max_drawdown_frac=0.20)`. Do not "reconcile" these by editing
-  the default.
-  **Caveat: that is policy, not yet plumbing.** `backtest.py:83` and
-  `sweep.py:93` both construct `GateParams()` internally with no override,
-  and no CLI flag exists, so today a run *cannot* pass 0.20. Wiring a
-  `--max-dd` flag through both call sites is the outstanding task; until it
-  lands, record in RUNLOG which threshold a run was actually judged at.
+- **Drawdown gate — decided 2026-09-11, plumbed the same day.**
+  `metrics.py:GateParams` keeps its **12%** default deliberately; it is the
+  stricter number and it stays. Do not "reconcile" it by editing the default.
+  Round-two evidence runs are judged at the frozen §4 Stage-2 criterion of
+  **20%**, passed explicitly:
+
+  ```bash
+  python -m gexbot backtest --start ... --end ... --max-dd 0.20
+  python -m gexbot sweep    --start ... --end ... --max-dd 0.20 --param ...
+  ```
+
+  The flag defaults to `GateParams().max_drawdown_frac`, so the CLI default
+  and the library default can never drift. **Every result records which
+  threshold judged it** — `gates.json` (`gate_params`), `summary.md`, the
+  console gate table, and a `maxdd_gate` column in the sweep parquet. Still
+  name the threshold in RUNLOG when logging a run.
+- **`gates.json` shape changed** when `--max-dd` landed: it now nests
+  `{"gate_params": {...}, "gates": {...}}` instead of being a flat map of
+  gates. `explore.py` reads both, so older bundles in `data/results` still
+  render; anything else that parses a bundle needs the same treatment.
 - `replay.py` still has a dead placeholder branch in the OI-loading path
   (a `type(led).load_oi.__self__ if False else None` no-op, immediately
   followed by `led.strikes.clear()` and a real bulk load).

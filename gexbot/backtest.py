@@ -24,7 +24,12 @@ console = Console()
 
 
 def run_backtest(start: dt.date, end: dt.date, *, tranche: float = 3000.0,
-                 out_dir: Path | None = None) -> dict:
+                 out_dir: Path | None = None,
+                 max_dd: float | None = None) -> dict:
+    """max_dd: the OOS max-drawdown threshold this run is judged at. Defaults
+    to GateParams' own 12%; round-two evidence runs pass 0.20 explicitly per
+    PREREGISTRATION §4. Whichever is used is recorded in gates.json and
+    summary.md so a bundle always says which threshold judged it."""
     from dotenv import load_dotenv
     load_dotenv()
     import os
@@ -80,7 +85,8 @@ def run_backtest(start: dt.date, end: dt.date, *, tranche: float = 3000.0,
     # ── pooled + walk-forward gates ──────────────────────────────────
     is_days, oos_days = walk_forward_split(results, oos_frac=0.25)
     rep_is, rep_oos = collect(is_days, tranche), collect(oos_days, tranche)
-    gates = rep_is.gates(rep_oos, GateParams())
+    gp = GateParams() if max_dd is None else GateParams(max_drawdown_frac=max_dd)
+    gates = rep_is.gates(rep_oos, gp)
 
     # ── era (yearly) split — the "is the edge decaying?" view ────────
     era_rows = []
@@ -107,17 +113,22 @@ def run_backtest(start: dt.date, end: dt.date, *, tranche: float = 3000.0,
                       f"({pct:.1f}%)")
 
     summary = _render(start, end, rep_is, rep_oos, gates, era_rows,
-                      skipped, out_dir)
+                      skipped, out_dir, gp)
     (out_dir / "summary.md").write_text(summary)
-    (out_dir / "gates.json").write_text(json.dumps(
-        {k: {"passed": v[0], "detail": v[1]} for k, v in gates.items()}, indent=2))
+    # Nested shape: the thresholds that judged this run travel WITH the
+    # verdicts, so a bundle is self-describing. explore.py reads both shapes.
+    (out_dir / "gates.json").write_text(json.dumps({
+        "gate_params": asdict(gp),
+        "gates": {k: {"passed": v[0], "detail": v[1]} for k, v in gates.items()},
+    }, indent=2))
     console.print(f"\n[bold]Results bundle:[/bold] {out_dir}")
-    return {"out_dir": str(out_dir), "gates": gates, "eras": era_rows}
+    return {"out_dir": str(out_dir), "gates": gates, "eras": era_rows,
+            "gate_params": asdict(gp)}
 
 
 def _render(start, end, rep_is: BacktestReport, rep_oos: BacktestReport,
             gates: dict, era_rows: list[dict], skipped: list[str],
-            out_dir: Path) -> str:
+            out_dir: Path, gp: GateParams) -> str:
     t = Table(title=f"Era split {start} → {end}")
     for c in ("year", "days", "trades", "net_pnl", "profit_factor", "halt_days"):
         t.add_column(c)
@@ -126,7 +137,9 @@ def _render(start, end, rep_is: BacktestReport, rep_oos: BacktestReport,
                     ("year", "days", "trades", "net_pnl", "profit_factor", "halt_days")))
     console.print(t)
 
-    g = Table(title="§10 Gates")
+    g = Table(title=f"§10 Gates  ·  judged at OOS maxDD <= "
+                    f"{gp.max_drawdown_frac:.1%}, OOS PF >= "
+                    f"{gp.min_profit_factor_oos}")
     g.add_column("gate"); g.add_column("pass"); g.add_column("detail")
     for k, (ok, detail) in gates.items():
         g.add_row(k, "[green]PASS" if ok else "[red]FAIL", detail)
@@ -141,7 +154,12 @@ def _render(start, end, rep_is: BacktestReport, rep_oos: BacktestReport,
              "| year | days | trades | net P&L | PF | halt days |", "|---|---|---|---|---|---|"]
     lines += [f"| {r['year']} | {r['days']} | {r['trades']} | ${r['net_pnl']:,} "
               f"| {r['profit_factor']} | {r['halt_days']} |" for r in era_rows]
-    lines += ["", "## Gates", ""]
+    judged = (f"_Judged at: OOS maxDD <= {gp.max_drawdown_frac:.1%}, "
+              f"OOS PF >= {gp.min_profit_factor_oos}, "
+              f"IS/OOS trades >= {gp.min_trades_is}/{gp.min_trades_oos}, "
+              f"annual costs ${gp.annual_fixed_costs:,.0f}, "
+              f"PF-top{gp.top_n_removed} >= {gp.min_pf_after_removal}._")
+    lines += ["", "## Gates", "", judged, ""]
     lines += [f"- **{k}**: {'PASS' if ok else 'FAIL'} — {d}" for k, (ok, d) in gates.items()]
     if skipped:
         lines += ["", f"_Skipped {len(skipped)} days with missing data "
