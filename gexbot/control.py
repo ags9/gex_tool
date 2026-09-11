@@ -52,6 +52,30 @@ class ArmResult:
     profit_factor: float
 
 
+def derangement(n: int, rng: random.Random, *, max_tries: int = 100) -> list[int]:
+    """A permutation of range(n) with no fixed point.
+
+    `shuffled_levels` is the sharpest test of H1 — same logic, same market,
+    wrong walls. A plain shuffle leaves ~1 day in e holding its OWN levels,
+    and on those days the arm is silently running the real strategy. That
+    biases the null arm upward and makes the test easier to pass, which is
+    the one direction an anti-false-positive control must never fail in.
+
+    Rejection sampling is uniform over derangements and needs ~e draws; the
+    cyclic shift is a guaranteed fixed-point-free fallback so this always
+    terminates. n < 2 has no derangement — the caller is told, not silently
+    handed a self-donating identity.
+    """
+    if n < 2:
+        return list(range(n))
+    for _ in range(max_tries):
+        idx = list(range(n))
+        rng.shuffle(idx)
+        if all(idx[i] != i for i in range(n)):
+            return idx
+    return [(i + 1) % n for i in range(n)]
+
+
 def _pf(trades) -> float:
     w = sum(t.pnl for t in trades if t.pnl > 0)
     l = -sum(t.pnl for t in trades if t.pnl < 0)
@@ -93,6 +117,10 @@ def run_control(start: dt.date, end: dt.date, *, seeds: int = 20,
     console.print(f"  {len(days)} sessions\n")
     if not days:
         return
+    if len(days) < 2:
+        console.print("[yellow]Only one session: no derangement exists, so the "
+                      "shuffled_levels arm degenerates to the real strategy. "
+                      "Treat that arm's result as meaningless.")
 
     # honour the env flag so the "strict / full strategy" arm can actually run
     _bo = os.getenv("GEX_BREAKOUT_ONLY") == "1"
@@ -127,10 +155,10 @@ def run_control(start: dt.date, end: dt.date, *, seeds: int = 20,
             rng = random.Random(zlib.crc32(f"{arm}:{seed}".encode()))
             trades, pnl = [], 0.0
 
-            # shuffled-levels arm: rotate level providers between days
+            # shuffled-levels arm: rotate level providers between days.
+            # True derangement — no day may donate its own levels to itself.
             if arm == "shuffled_levels":
-                idx = list(range(len(days)))
-                rng.shuffle(idx)
+                idx = derangement(len(days), rng)
 
             for i, day in enumerate(days):
                 if arm == "shuffled_levels":

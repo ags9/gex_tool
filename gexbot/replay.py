@@ -21,6 +21,7 @@ from pathlib import Path
 
 import polars as pl
 
+from .clock import minute_of_day_et, minute_of_day_expr
 from .daysim import Providers
 from .marks_rest import MarkFetcher, occ_ticker
 from .ledger import (BaselineModel, BlockFlowTracker, Ledger, classify_trade)
@@ -34,13 +35,6 @@ COL_SIZE = "size"
 COL_BID = "bid_price"
 COL_ASK = "ask_price"
 IDX_TICKER = "I:SPX"
-ET_UTC_OFFSET_HOURS = -5        # replay v0: standard time; TODO real tz calendar
-
-
-def _minute_of_day_et(ts_ns: int) -> int:
-    t = dt.datetime.fromtimestamp(ts_ns / 1e9, tz=dt.timezone.utc)
-    t = t + dt.timedelta(hours=ET_UTC_OFFSET_HOURS)
-    return t.hour * 60 + t.minute
 
 
 @dataclass
@@ -59,7 +53,7 @@ class QuoteBook:
 
     def __init__(self, quotes: pl.DataFrame):
         q = quotes.sort(COL_TS)
-        self.minutes = [(_minute_of_day_et(t)) for t in q[COL_TS]]
+        self.minutes = [minute_of_day_et(t) for t in q[COL_TS]]
         self.bids = q[COL_BID].to_list()
         self.asks = q[COL_ASK].to_list()
 
@@ -103,8 +97,7 @@ class ReplayBuilder:
             raise FileNotFoundError(f"no index_values for {day}")
         ts_col = COL_TS_IDX if COL_TS_IDX in df.columns else COL_TS
         df = df.filter(pl.col("ticker") == IDX_TICKER).with_columns(
-            pl.col(ts_col).map_elements(_minute_of_day_et, return_dtype=pl.Int64)
-            .alias("mod")
+            minute_of_day_expr(ts_col).alias("mod")
         ).filter((pl.col("mod") >= SESSION_START) & (pl.col("mod") < 16 * 60))
         df = df.with_columns(
             ((pl.col("mod") - SESSION_START) // BAR_MIN).alias("bar_i")
@@ -171,7 +164,7 @@ class ReplayBuilder:
                   .select(["strike", "right", COL_SIZE, COL_TS, "side"])
                   .collect())
             for r in tq.iter_rows(named=True):
-                mod = _minute_of_day_et(r[COL_TS])
+                mod = minute_of_day_et(r[COL_TS])
                 if not (SESSION_START <= mod < 16 * 60):
                     continue
                 bar_i = (mod - SESSION_START) // BAR_MIN

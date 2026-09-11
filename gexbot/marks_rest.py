@@ -24,9 +24,10 @@ from pathlib import Path
 import httpx
 import polars as pl
 
+from .clock import minute_of_day_et
+
 BASE = "https://api.polygon.io"
 SESSION_START_MIN = 9 * 60 + 30
-ET_UTC_OFFSET_HOURS = -4          # ET during DST; replay v0 (see replay._minute_of_day_et)
 
 
 def occ_ticker(root: str, expiry: dt.date, right: str, strike: float) -> str:
@@ -60,9 +61,7 @@ class ContractQuotes:
 
 
 def _ns_to_minute_of_day(ts_ns: int) -> int:
-    t = dt.datetime.fromtimestamp(ts_ns / 1e9, tz=dt.timezone.utc)
-    t = t + dt.timedelta(hours=ET_UTC_OFFSET_HOURS)
-    return t.hour * 60 + t.minute
+    return minute_of_day_et(ts_ns)
 
 
 class MarkFetcher:

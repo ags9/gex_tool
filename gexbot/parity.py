@@ -22,6 +22,7 @@ from pathlib import Path
 import polars as pl
 from rich.console import Console
 
+from .clock import et_minute_to_utc_ns, minute_of_day_expr
 from .config import settings
 from .manifest import Manifest
 
@@ -31,13 +32,6 @@ COL_TS = "sip_timestamp"
 COL_PRICE = "price"
 SESSION_START = 9 * 60 + 30
 SESSION_END = 16 * 60
-ET_UTC_OFFSET_HOURS = -4
-
-
-def _minute_expr(col: str) -> pl.Expr:
-    """UTC ns -> ET minute-of-day, vectorized (no Python UDFs)."""
-    secs = pl.col(col) // 1_000_000_000 + ET_UTC_OFFSET_HOURS * 3600
-    return ((secs % 86400) // 60).cast(pl.Int64)
 
 
 def reconstruct_day(trades_path: Path, *, roots=("SPX", "SPXW"),
@@ -47,7 +41,7 @@ def reconstruct_day(trades_path: Path, *, roots=("SPX", "SPXW"),
     lf = (
         pl.scan_parquet(trades_path)
         .filter(pl.col("root").is_in(list(roots)))
-        .with_columns(_minute_expr(COL_TS).alias("mod"))
+        .with_columns(minute_of_day_expr(COL_TS).alias("mod"))
         .filter((pl.col("mod") >= SESSION_START) & (pl.col("mod") < SESSION_END))
         .select(["mod", "strike", "right", COL_PRICE, "expiry"])
     )
@@ -86,16 +80,12 @@ def reconstruct_day(trades_path: Path, *, roots=("SPX", "SPXW"),
                        / pl.col("_med")) < 0.005)
               .drop("_med"))
 
-    day_date = trades_path.parent.name.split("=")[1]
-    base = dt.datetime.fromisoformat(day_date).replace(tzinfo=dt.timezone.utc)
+    day = dt.date.fromisoformat(trades_path.parent.name.split("=")[1])
     return pl.DataFrame({
         "ticker": ["I:SPX"] * est.height,
         "value": est["value"].cast(pl.Float64),
-        "timestamp": [
-            int((base + dt.timedelta(minutes=int(m) - ET_UTC_OFFSET_HOURS * 60))
-                .timestamp() * 1e9)
-            for m in est["mod"].to_list()
-        ],
+        "timestamp": [et_minute_to_utc_ns(day, int(m))
+                      for m in est["mod"].to_list()],
         "source": ["parity"] * est.height,
     }, schema={"ticker": pl.Utf8, "value": pl.Float64,
                "timestamp": pl.Int64, "source": pl.Utf8})

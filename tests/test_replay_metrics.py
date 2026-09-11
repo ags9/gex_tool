@@ -9,15 +9,21 @@ import numpy as np
 import polars as pl
 import pytest
 
+from gexbot.clock import et_minute_to_utc_ns
 from gexbot.daysim import DayResult, DaySimulator, SimConfig, TradeRecord
 from gexbot.metrics import BacktestReport, GateParams, collect, walk_forward_split
 from gexbot.replay import ReplayBuilder
 from gexbot.synth import SESSION_START
 
 DAY = dt.date(2025, 6, 10)
-ET_TO_UTC_NS = lambda mod: int((dt.datetime(2025, 6, 10, mod // 60, mod % 60,
-                                            tzinfo=dt.timezone.utc)
-                                - dt.timedelta(hours=-5)).timestamp() * 1e9)
+
+
+def ET_TO_UTC_NS(mod: int) -> int:
+    """Build the fixture the way real flat files are stamped: a true UTC
+    nanosecond for an Eastern wall-clock minute. DAY is in June, so this is
+    EDT — the old fixture hardcoded -5 and round-tripped through a replay
+    that also hardcoded -5, which made two compensating bugs look correct."""
+    return et_minute_to_utc_ns(DAY, mod)
 
 
 @pytest.fixture()

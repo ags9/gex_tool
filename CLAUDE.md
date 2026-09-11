@@ -1,7 +1,7 @@
 # CLAUDE.md — gexbot
 
 Persistent context for Claude Code sessions in this repo.
-Baseline: commit `5fc7e97`, 2026-09-11. Facts marked *(verify)* may drift.
+Baseline: commit `432d0af`+, 2026-09-11. Facts marked *(verify)* may drift.
 
 ---
 
@@ -55,7 +55,7 @@ forms."*
 ### What is nonetheless solid
 
 A pipeline that survives 7-billion-row days; ledgers, greeks, entry/exit/
-discipline engines (36 tests passing *(verify)*); honest REST NBBO marks
+discipline engines (55 tests passing *(verify)*); honest REST NBBO marks
 with provenance tracking; a backtest runner with era splits and executable
 gates; a four-arm control harness; put-call-parity spot reconstruction for
 pre-2023; Discord alerting; a results explorer. None of this is invalidated
@@ -246,6 +246,9 @@ it silently changes what was tested.
 gexbot/
   config.py       Typed pydantic settings — single source of truth.
                   No hardcoded paths/ports/parameters anywhere else.
+  clock.py        THE timezone authority. UTC ns <-> ET minute-of-day via
+                  zoneinfo, scalar + vectorized + inverse. Never reintroduce a
+                  hardcoded UTC offset; import from here.
   pipeline.py     S3 flat-file download → filtered zstd Parquet. KEYS = S3 templates.
   manifest.py     DuckDB manifest; makes backfill resumable.
   symbols.py      OCC root parsing.
@@ -295,7 +298,7 @@ flat 15:50, max 3 trades/day (5 on range days), 2 losing trades ends the day,
 ```bash
 uv venv && source .venv/bin/activate && uv pip install -e ".[dev]"
 cp .env.example .env          # fill Massive keys + GEX_DATA_ROOT
-python -m pytest -q           # 36 passing as of 5fc7e97
+python -m pytest -q           # 55 passing
 ruff check .                  # line-length 100
 ```
 
@@ -308,37 +311,53 @@ live), ports 8741/8742. **Never commit `.env`; never send creds anywhere.**
 
 ---
 
-## 9. Known gaps (as of `5fc7e97`)
+## 9. Known gaps
+
+**Open**
 
 - **`docs/HANDOFF.md` does not exist** — not on disk, not in git history —
   yet `watch.py:11` cites "HANDOFF §2" as the canonical account of the two
   validation failures. This file (§2) is currently the best substitute.
 - **`docs/RUNLOG.md` does not exist**, though prereg §5 makes it mandatory
   for every run. **Create it with the first round-two run.**
-- **Gate mismatch:** `metrics.py:GateParams.max_drawdown_frac = 0.12` vs the
-  frozen §4 Stage-2 criterion of **20%**. The code is stricter, so nothing
-  invalid has passed — but they disagree, and §4 is the document whose
-  numbers do not move. Resolve deliberately, not by quietly editing either.
-- `PREREGISTRATION.md` still reads `Status: DRAFT` with a blank freeze date,
-  while `prereg-v1` has been tagged since 2026-09-09. The three commits after
-  the tag are infrastructure only — no parameter changes — so the freeze
-  looks intact.
-- **Stale duplicate modules at repo root** (`config.py`, `exits.py`,
-  `greeks.py`, `ledger.py`, `manifest.py`, `pipeline.py`, `symbols.py`,
-  `__main__.py`, `__init__.py`) shadowing `gexbot/`. Four are identical, four
-  have **diverged**. Nothing imports them (`pyproject` declares no
-  py-modules). Plus a stray `fix_levels_units.py`. Always edit `gexbot/`, and
-  confirm before deleting the root copies.
-- `replay.py` has a dead placeholder branch in the OI-loading path and a
-  `ET_UTC_OFFSET_HOURS = -5` constant with a `TODO real tz calendar` — DST is
-  not handled. `parity.py` independently uses `-4`. Worth reconciling before
-  anything timing-sensitive.
-- `control.py`'s `shuffled_levels` arm shuffles day indices without
-  guaranteeing a derangement, so a day can occasionally donate its own levels
-  to itself. With ~N days the effect is small, but it slightly weakens the
-  sharpest test of H1.
+- **Drawdown gate — decided 2026-09-11.** `metrics.py:GateParams` keeps its
+  **12%** default deliberately; it is the stricter number and it stays.
+  Round-two evidence runs are to be judged at the frozen §4 Stage-2
+  criterion of **20%**, passed explicitly as
+  `GateParams(max_drawdown_frac=0.20)`. Do not "reconcile" these by editing
+  the default.
+  **Caveat: that is policy, not yet plumbing.** `backtest.py:83` and
+  `sweep.py:93` both construct `GateParams()` internally with no override,
+  and no CLI flag exists, so today a run *cannot* pass 0.20. Wiring a
+  `--max-dd` flag through both call sites is the outstanding task; until it
+  lands, record in RUNLOG which threshold a run was actually judged at.
+- `replay.py` still has a dead placeholder branch in the OI-loading path
+  (a `type(led).load_oi.__self__ if False else None` no-op, immediately
+  followed by `led.strikes.clear()` and a real bulk load).
+- `fix_levels_units.py` remains at repo root — a stray one-off script, not a
+  duplicate module. Tracked. Review and delete when convenient.
 
----
+**Fixed 2026-09-11** (kept here so the failure modes stay visible)
+
+- ~~Timezone~~ — three modules hardcoded three different UTC offsets
+  (`replay.py` -5, `parity.py` -4, `marks_rest.py` -4), so the same instant
+  bucketed into different bars depending on which module read it, and every
+  date on the wrong side of a DST boundary shifted by an hour — inside the
+  09:45-14:30 entry window. All three now import `gexbot/clock.py`.
+  Found while fixing: `dt.hour()` returns Int8 in polars, so the vectorized
+  `hour * 60` silently overflowed (9*60 → 28) until cast to Int64. The old
+  `test_replay_metrics` fixture stamped its timestamps with the same -5 the
+  replay used, so two compensating bugs read as correct — the fixture now
+  builds true ET timestamps. `tests/test_clock_control.py` covers a summer
+  and a winter date in both directions.
+- ~~`shuffled_levels` self-donation~~ — the arm shuffled day indices without
+  guaranteeing a derangement, so ~1 day in e kept its own walls and silently
+  ran the real strategy inside the null arm, biasing H1's sharpest test
+  toward passing. Now `control.derangement()`, with a warning when a
+  single-session range makes the arm meaningless.
+- ~~Stale root duplicates~~ — nine modules shadowing `gexbot/` (four
+  identical, four diverged) deleted. `top_level.txt` was already `gexbot`
+  only, so nothing imported them.
 
 ## 10. Working agreements for sessions in this repo
 
