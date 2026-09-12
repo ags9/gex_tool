@@ -145,6 +145,12 @@ def create_app(db_path=None, results_root=None) -> FastAPI:
             r["shadow"] = by_pos.get(r["position_id"], [])
         return rows
 
+    @app.get("/api/shadow/by-symbol")
+    async def shadow_by_symbol():
+        """§3 comparison split per instrument — SPX and XSP ladders are not
+        comparable on a pooled average (spec §2.6, amended)."""
+        return await asyncio.to_thread(reader.shadow_by_symbol)
+
     @app.get("/api/tape")
     async def tape(underlying: str | None = Query(None),
                    limit: int = Query(200, ge=1, le=2000),

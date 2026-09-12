@@ -440,24 +440,53 @@ class StateReader:
         """
         if not self.exists:
             return []
-        sql = """SELECT position_id, policy,
-                        count(*)            AS fills,
-                        sum(contracts)      AS contracts,
-                        sum(pnl)            AS pnl,
-                        sum(spread_cost)    AS spread_cost,
-                        sum(commission)     AS commission,
-                        min(minute_of_day)  AS first_minute,
-                        max(minute_of_day)  AS last_minute,
-                        string_agg(rule, ' -> ' ORDER BY shadow_id) AS rules
-                 FROM exit_shadow"""
+        # Joined to the position so `symbol` travels with the comparison:
+        # SPX and XSP ladders must be readable separately, because pooling
+        # them would let SPX's tight book hide XSP's spread inside an average
+        # (spec §2.6, amended 2026-09-12).
+        sql = """SELECT e.position_id, p.symbol, e.policy,
+                        count(*)              AS fills,
+                        sum(e.contracts)      AS contracts,
+                        sum(e.pnl)            AS pnl,
+                        sum(e.spread_cost)    AS spread_cost,
+                        sum(e.commission)     AS commission,
+                        min(e.minute_of_day)  AS first_minute,
+                        max(e.minute_of_day)  AS last_minute,
+                        string_agg(e.rule, ' -> ' ORDER BY e.shadow_id) AS rules
+                 FROM exit_shadow e
+                 LEFT JOIN paper_position p USING (position_id)"""
         params: list = []
         if position_id is not None:
-            sql += " WHERE position_id = ?"
+            sql += " WHERE e.position_id = ?"
             params.append(position_id)
         with _connect(self.path) as con:
             return _dicts_optional(
-                con, sql + " GROUP BY position_id, policy "
-                           "ORDER BY position_id DESC, policy", params)
+                con, sql + " GROUP BY e.position_id, p.symbol, e.policy "
+                           "ORDER BY e.position_id DESC, e.policy", params)
+
+    def shadow_by_symbol(self) -> list[dict]:
+        """The §3 verdict, split per instrument.
+
+        The question the spec now asks is not "is the ladder better" but "is
+        the ladder better *on this symbol*" — XSP's spread is wide enough that
+        a pooled answer would be meaningless.
+        """
+        if not self.exists:
+            return []
+        with _connect(self.path) as con:
+            return _dicts_optional(con, """
+                SELECT p.symbol, e.policy,
+                       count(DISTINCT e.position_id) AS positions,
+                       count(*)            AS fills,
+                       sum(e.pnl)          AS pnl,
+                       sum(e.spread_cost)  AS spread_cost,
+                       sum(e.commission)   AS commission,
+                       sum(e.pnl) / nullif(count(DISTINCT e.position_id), 0)
+                                           AS pnl_per_position
+                FROM exit_shadow e
+                JOIN paper_position p USING (position_id)
+                GROUP BY p.symbol, e.policy
+                ORDER BY p.symbol, e.policy""")
 
     def narration(self, poll_id: int) -> dict | None:
         if not self.exists:

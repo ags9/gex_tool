@@ -382,25 +382,34 @@ live), ports 8741/8742. **Never commit `.env`; never send creds anywhere.**
 
 **Open**
 
-- **The exit manager is PAPER ONLY and has no write API.** Spec §4 asks for a
-  phone order ticket, but CLAUDE.md §13 gives the API no write path and the
-  spec's own §0 says "everything there still binds". Shadow mode (§3) does not
-  need one — the operator enters through his own broker and registers the
-  position with `gexbot paper open` — so the conflict is deferred, not
-  resolved. **Promotion to live management needs that decision made
-  explicitly**, along with the Schwab gateway (§5.1), Tailscale access (§5),
-  and broker-state reconciliation (§7); none of those is built.
+- **The API stays read-only — decided 2026-09-12, not deferred.** Spec §4
+  asks for a phone order ticket; the API does not get one. The write path is a
+  *live-management* question and gets its own review when live management is
+  on the table, together with the Schwab gateway (§5.1), Tailscale access
+  (§5), and broker-state reconciliation (§7). None of those is built, and none
+  should be added piecemeal. Shadow mode needs no write path: the operator
+  enters through his own broker and registers the position with
+  `gexbot paper open`. **Do not add a POST to `api/app.py` to unblock a UI
+  feature** — `allow_methods=["GET"]` is the enforcement, and §13 is the
+  reason.
 - **XSP publishes no option greeks.** Measured live: 0 of 2,918 contracts
   carry `greeks.gamma`, so a gamma profile cannot be built from XSP's own
   chain. The chain view shows the SPX map's gamma at the equivalent level,
   tagged `gex_source: "spx_map"` and labelled in the UI. Unlike SPY, ×10 is
   exact here — XSP is one tenth of the *same index* by contract definition and
   carries no tracking basis.
-- **XSP spreads are much worse than SPX's**, which is the §2.6 cost the ladder
-  pays on every tranche. Measured on the same strikes: XSP calls at 5.86 /
-  6.75 / 6.38 against SPX at a uniform 0.40-0.50. The chain view flags any
-  spread over 15% of mid in amber. The shadow record counts spread per tranche
-  separately from P&L for the same reason.
+- **XSP spreads undermine the case for laddering XSP.** Measured on the same
+  strikes and expiry: XSP calls at 5.86 / 6.75 / 6.38 against SPX at a uniform
+  0.40-0.50 — on a ~$3 mid, a spread of 100-200% of the contract's value,
+  crossed once per tranche. The original reasoning in the spec (XSP is
+  affordable at 3 contracts, therefore XSP is where scaling out becomes
+  possible) inferred from affordability to laddering and does not hold; the
+  spec is amended in place to say so.
+  **Likely conclusion: ladder on SPX, single contract on XSP.** It is a
+  hypothesis, not a finding — behaviour is unchanged and §3 decides it. The
+  comparison must be read **per symbol**: `shadow_by_symbol()` and
+  `/api/shadow/by-symbol` exist because pooling the two would let SPX's tight
+  book hide XSP's cost inside an average.
 
 - **`tape_print` is in DuckDB, which §15.2 said not to do.** A deliberate,
   flagged deviation: the spec's stated reason is volume ("millions per

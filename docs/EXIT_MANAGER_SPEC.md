@@ -34,6 +34,21 @@ the answer is no — that goes through `PREREGISTRATION.md`.
 - **SPX and XSP.** XSP matters here: at 1/10th the size, a 3-contract
   position is affordable at this capital, which is what makes scaling out
   possible at all. Its thinner book is a real cost — see §2.6.
+
+  **Amended 2026-09-12, qualifying the sentence above.** That reasoning was
+  half right and should not stand unqualified. XSP does make a 3-contract
+  position affordable; it does not follow that laddering XSP is worth doing,
+  because the affordability is bought with a spread that the ladder then pays
+  twice. Measured live on the same strikes, same expiry: **XSP calls quoted
+  5.86 / 6.75 / 6.38 wide against SPX at a uniform 0.40–0.50.** On a
+  ~$3 mid that is a spread of roughly 100–200% of the contract's value,
+  crossed once per tranche.
+  The likely conclusion is **ladder on SPX, single contract on XSP** — but it
+  is a hypothesis, not a finding, and §3 is what decides it. Behaviour is
+  unchanged: the ladder still applies to any position of 2+ contracts in
+  either symbol, and the shadow record carries the spread per tranche and the
+  symbol so the question can be answered per-instrument from the record
+  rather than from this paragraph.
 - **No UI overhaul.** The only new surface is the chain view (§4). The
   existing screens stay as they are.
 
@@ -117,6 +132,21 @@ Scaling out crosses the bid/ask on each tranche instead of once. On XSP,
 whose book is thinner than SPX's, that cost is not trivial. Record the
 spread paid per tranche so §3 can weigh the ladder against all-at-once
 honestly rather than on the P&L headline alone.
+
+**Measured 2026-09-12.** "Not trivial" understated it. Sampled from the chain
+view, same strikes and same expiry as SPX:
+
+| | call spread | put spread |
+|---|---|---|
+| SPX 7,630–7,680 | 0.40–0.50 | 0.40–0.50 |
+| XSP 763–771 (= SPX 7,630–7,710) | 0.19–6.75 | 0.15–6.38 |
+
+XSP's near-the-money strikes quote competitively (0.15–0.31); the damage is
+concentrated a few strikes out, where a single crossing can exceed the
+contract's own mid. This is why §0.1's inference from affordability to
+laddering does not hold, and why the comparison in §3 must be read
+per-symbol and not pooled — pooling SPX and XSP ladders would let SPX's tight
+book hide XSP's cost inside an average.
 
 ### 2.4 Disaster backstop
 A resting stop order at the broker, set **wide** (⚙ −50% of premium), placed

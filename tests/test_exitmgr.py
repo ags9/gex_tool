@@ -213,3 +213,46 @@ def test_nothing_here_can_open_a_position():
     assert p.remaining < before
     assert not any(n.startswith("open") or n.startswith("enter")
                    for n in dir(p)), "no entry surface on a managed position"
+
+
+# ── the comparison must be readable per instrument (§2.6, amended) ────
+def test_shadow_comparison_carries_the_symbol(tmp_path):
+    """Pooling SPX and XSP ladders would let SPX's tight book hide XSP's
+    spread inside an average, so `symbol` travels with the comparison."""
+    import datetime as dt
+
+    from gexbot.api.reader import StateReader
+    from gexbot.state import StateStore
+
+    db = tmp_path / "s.duckdb"
+    store = StateStore(db)
+
+    def record(symbol: str, spread: float, mult: float) -> None:
+        pid = store.open_paper_position(
+            symbol=symbol, direction=1, contracts=3, strike=7650.0 * mult,
+            expiry=dt.date(2026, 9, 16), entry_spot=7650.0 * mult,
+            entry_premium=10.0 * mult, target_level=7700.0 * mult,
+            next_level=7720.0 * mult)
+        book = ShadowBook(pos(symbol=symbol, entry_premium=10.0 * mult,
+                              entry_spot=7650.0 * mult,
+                              target_level=7700.0 * mult,
+                              next_level=7720.0 * mult,
+                              points_per_spx_point=mult))
+        for minute, spot, mark in [(608, 7701.0 * mult, 16.0 * mult),
+                                   (612, 7721.0 * mult, 24.0 * mult)]:
+            store.write_shadow_fills(
+                pid, book.step(minute=minute, spot=spot, mark=mark,
+                               spread=spread))
+
+    record("SPX", 0.45, 1.0)      # tight book
+    record("XSP", 5.86, 0.1)      # the spread measured live on 2026-09-12
+
+    reader = StateReader(db)
+    assert all("symbol" in r for r in reader.shadow_comparison())
+
+    rollup = {(r["symbol"], r["policy"]): r for r in reader.shadow_by_symbol()}
+    assert {s for s, _ in rollup} == {"SPX", "XSP"}
+    # the mechanism the amendment describes: XSP's spread dwarfs SPX's on the
+    # same path, which is why the two cannot be judged on a pooled average
+    assert rollup[("XSP", "ladder")]["spread_cost"] > \
+        rollup[("SPX", "ladder")]["spread_cost"] * 5
