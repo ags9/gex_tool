@@ -81,6 +81,25 @@ def main() -> None:
     pm.add_argument("--dry-run", action="store_true",
                     help="print the summary without posting to Discord")
 
+    pp = sub.add_parser("paper",
+                        help="register/close a PAPER position for the exit "
+                             "manager to shadow (no broker, no money)")
+    psub = pp.add_subparsers(dest="paper_cmd", required=True)
+    po = psub.add_parser("open", help="register a position you entered manually")
+    po.add_argument("--symbol", choices=["SPX", "XSP"], required=True)
+    po.add_argument("--right", choices=["C", "P"], required=True)
+    po.add_argument("--strike", type=float, required=True)
+    po.add_argument("--contracts", type=int, required=True)
+    po.add_argument("--premium", type=float, required=True, help="entry mid")
+    po.add_argument("--spot", type=float, required=True)
+    po.add_argument("--target", type=float, required=True, help="GEX level aimed at")
+    po.add_argument("--next-level", type=float, default=None)
+    po.add_argument("--expiry", type=dt.date.fromisoformat, default=None)
+    po.add_argument("--note", default=None)
+    pc = psub.add_parser("close", help="mark a position closed (you exited)")
+    pc.add_argument("--id", type=int, required=True)
+    psub.add_parser("list", help="show positions and the three shadow policies")
+
     ap = sub.add_parser("api", help="serve the read-only state API (localhost only)")
     ap.add_argument("--port", type=int, default=settings.gex_api_port,
                     help="default %(default)s (GEX_API_PORT)")
@@ -195,6 +214,38 @@ def main() -> None:
     elif args.cmd == "premarket":
         from .premarket import run_premarket
         raise SystemExit(run_premarket(day=args.date, dry_run=args.dry_run))
+    elif args.cmd == "paper":
+        from dotenv import load_dotenv  # type: ignore
+        load_dotenv()
+        from .state import StateStore, default_path
+        store = StateStore(default_path())
+        if args.paper_cmd == "open":
+            pid = store.open_paper_position(
+                symbol=args.symbol, direction=1 if args.right == "C" else -1,
+                contracts=args.contracts, strike=args.strike, expiry=args.expiry,
+                entry_spot=args.spot, entry_premium=args.premium,
+                target_level=args.target, next_level=args.next_level,
+                note=args.note)
+            console.print(f"[green]paper position {pid} registered "
+                          f"(PAPER ONLY — nothing was sent anywhere)")
+        elif args.paper_cmd == "close":
+            ok = store.close_paper_position(args.id)
+            console.print("[green]closed" if ok else "[red]not found")
+        else:
+            from .api.reader import StateReader
+            r = StateReader()
+            rows = r.positions()
+            if not rows:
+                console.print("no paper positions")
+            for row in rows:
+                console.print(f"[bold]{row['position_id']}[/bold] {row['symbol']} "
+                              f"{row['strike']:,.0f}{'C' if row['direction'] > 0 else 'P'} "
+                              f"x{row['contracts']} @ {row['entry_premium']:.2f} "
+                              f"target {row['target_level']:,.1f} · {row['status']}")
+                for sh in r.shadow_comparison(row["position_id"]):
+                    console.print(f"    {sh['policy']:<11} pnl ${sh['pnl']:>9,.0f} "
+                                  f" spread ${sh['spread_cost']:>7,.0f} "
+                                  f" {sh['rules']}")
     elif args.cmd == "api":
         from .api import run_api
         run_api(port=args.port)

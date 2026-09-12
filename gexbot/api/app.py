@@ -116,6 +116,35 @@ def create_app(db_path=None, results_root=None) -> FastAPI:
         poll["as_of"] = poll["ts"]
         return poll
 
+    @app.get("/api/chain")
+    async def chain(symbol: str = Query("SPX", pattern="^(SPX|XSP)$"),
+                    dte: int = Query(3, ge=0, le=60),
+                    strikes: int = Query(5, ge=1, le=25)):
+        """Entry-surface chain (exit-manager spec §4). Read-only: this shows
+        contracts, it does not place one."""
+        import os
+
+        from ..chain import chain_view
+        key = os.getenv("MASSIVE_API_KEY", "")
+        if not key or key == "your_key_here":
+            raise HTTPException(503, "MASSIVE_API_KEY not configured")
+        try:
+            return await asyncio.to_thread(chain_view, symbol, key,
+                                           dte=dte, strikes=strikes)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+    @app.get("/api/positions")
+    async def positions(open_only: bool = Query(False)):
+        rows = await asyncio.to_thread(reader.positions, open_only=open_only)
+        shadow = await asyncio.to_thread(reader.shadow_comparison, None)
+        by_pos: dict = {}
+        for s_ in shadow:
+            by_pos.setdefault(s_["position_id"], []).append(s_)
+        for r in rows:
+            r["shadow"] = by_pos.get(r["position_id"], [])
+        return rows
+
     @app.get("/api/tape")
     async def tape(underlying: str | None = Query(None),
                    limit: int = Query(200, ge=1, le=2000),

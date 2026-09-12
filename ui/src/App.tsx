@@ -1,6 +1,7 @@
 import { NavLink, Navigate, Route, Routes } from "react-router-dom";
 
 import { todayEt } from "./components/minute";
+import Chain from "./pages/Chain";
 import Live from "./pages/Live";
 import Research from "./pages/Research";
 import Session from "./pages/Session";
@@ -11,6 +12,7 @@ export default function App() {
       <nav className="flex items-center gap-1 border-b border-neutral-800 bg-neutral-950 px-4 py-1.5 text-xs">
         <Tab to="/">Live</Tab>
         <Tab to={`/session/${todayEt()}`}>Session</Tab>
+        <Tab to="/chain">Chain</Tab>
         <Tab to="/research">Research</Tab>
         <span className="ml-auto text-neutral-700">
           read-only · localhost
@@ -21,6 +23,7 @@ export default function App() {
         <Route path="/" element={<Live />} />
         <Route path="/session" element={<Navigate to={`/session/${todayEt()}`} replace />} />
         <Route path="/session/:date" element={<Session />} />
+        <Route path="/chain" element={<Chain />} />
         <Route path="/research" element={<Research />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

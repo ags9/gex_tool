@@ -184,6 +184,46 @@ CREATE TABLE IF NOT EXISTS tape_stats (
     PRIMARY KEY (underlying, session_date)
 );
 
+-- Paper positions the operator registered for the bot to watch (exit-manager
+-- spec §3). PAPER ONLY: nothing here has ever been sent to a broker.
+CREATE TABLE IF NOT EXISTS paper_position (
+    position_id    BIGINT PRIMARY KEY,
+    session_date   DATE NOT NULL,
+    symbol         VARCHAR NOT NULL,       -- SPX | XSP
+    direction      INTEGER NOT NULL,       -- +1 long call, -1 long put
+    contracts      INTEGER NOT NULL,
+    strike         DOUBLE NOT NULL,
+    expiry         DATE,
+    entry_ts       TIMESTAMP NOT NULL,
+    entry_minute   INTEGER NOT NULL,
+    entry_spot     DOUBLE NOT NULL,
+    entry_premium  DOUBLE NOT NULL,
+    target_level   DOUBLE NOT NULL,
+    next_level     DOUBLE,
+    status         VARCHAR NOT NULL,       -- open | closed
+    closed_ts      TIMESTAMP,
+    note           VARCHAR
+);
+
+-- One row per simulated tranche close, per policy. Three policies per
+-- position (§3): what the operator did, close-all-at-target, and the ladder.
+-- Recording only one would be unrecoverable later.
+CREATE TABLE IF NOT EXISTS exit_shadow (
+    shadow_id      BIGINT PRIMARY KEY,
+    position_id    BIGINT NOT NULL,
+    policy         VARCHAR NOT NULL,       -- manual | target_all | ladder
+    rule           VARCHAR NOT NULL,
+    ts             TIMESTAMP NOT NULL,
+    minute_of_day  INTEGER NOT NULL,
+    spot           DOUBLE NOT NULL,
+    mark           DOUBLE NOT NULL,
+    fill_price     DOUBLE NOT NULL,
+    contracts      INTEGER NOT NULL,
+    spread_cost    DOUBLE NOT NULL,        -- §2.6, per tranche
+    commission     DOUBLE NOT NULL,
+    pnl            DOUBLE NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS narration (
     poll_id       BIGINT PRIMARY KEY,
     ts            TIMESTAMP NOT NULL,
@@ -548,6 +588,75 @@ class StateStore:
             return len(rows)
         except Exception as e:
             self._note(e, "write_tape")
+            return 0
+
+    def open_paper_position(self, *, symbol: str, direction: int,
+                            contracts: int, strike: float, expiry: dt.date | None,
+                            entry_spot: float, entry_premium: float,
+                            target_level: float, next_level: float | None = None,
+                            note: str | None = None,
+                            ts: dt.datetime | None = None) -> int | None:
+        """Register a position for the bot to watch. PAPER ONLY — this places
+        nothing and reaches no broker (spec §0.1)."""
+        if not self.available:
+            return None
+        ts = ts or _utcnow()
+        try:
+            pid = self._next_id("paper", ts)
+            with connect(self.path) as con:
+                con.execute(
+                    """INSERT INTO paper_position
+                       (position_id, session_date, symbol, direction, contracts,
+                        strike, expiry, entry_ts, entry_minute, entry_spot,
+                        entry_premium, target_level, next_level, status,
+                        closed_ts, note)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'open',NULL,?)""",
+                    [pid, session_date_of(ts), symbol, int(direction),
+                     int(contracts), float(strike), expiry,
+                     ts.replace(tzinfo=None), minute_of(ts), float(entry_spot),
+                     float(entry_premium), float(target_level), next_level, note])
+            return pid
+        except Exception as e:
+            self._note(e, "open_paper_position")
+            return None
+
+    def close_paper_position(self, position_id: int,
+                             ts: dt.datetime | None = None) -> bool:
+        if not self.available:
+            return False
+        ts = ts or _utcnow()
+        try:
+            with connect(self.path) as con:
+                con.execute(
+                    "UPDATE paper_position SET status='closed', closed_ts=? "
+                    "WHERE position_id=?", [ts.replace(tzinfo=None), position_id])
+            return True
+        except Exception as e:
+            self._note(e, "close_paper_position")
+            return False
+
+    def write_shadow_fills(self, position_id: int, fills: list,
+                           ts: dt.datetime | None = None) -> int:
+        """Persist simulated tranche closes. `fills` are shadow.Fill objects."""
+        if not self.available or not fills:
+            return 0
+        base = ts or _utcnow()
+        try:
+            rows = []
+            for f in fills:
+                rows.append((self._next_id("shadow", base), position_id,
+                             f.policy.value, f.rule.value,
+                             base.replace(tzinfo=None), int(f.minute),
+                             float(f.spot), float(f.mark), float(f.fill_price),
+                             int(f.contracts), float(f.spread_cost),
+                             float(f.commission), float(f.pnl)))
+            with connect(self.path) as con:
+                con.executemany(
+                    "INSERT INTO exit_shadow VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    rows)
+            return len(rows)
+        except Exception as e:
+            self._note(e, "write_shadow_fills")
             return 0
 
     def write_narration(self, poll_id: int, text: str, model: str,

@@ -238,3 +238,35 @@ export interface TapeStats {
   gamma_miss_pct: number | null;
   block_threshold: number | null;
 }
+
+export interface ChainQuote {
+  bid: number | null;
+  ask: number | null;
+  mid: number | null;
+  spread: number | null;
+}
+
+export interface ChainRow {
+  strike: number;
+  spx_equivalent: number;
+  gex: number | null;
+  /** "own" = this symbol's chain. "spx_map" = XSP publishes no greeks, so the
+   *  SPX map's gamma at the equivalent level is shown instead. */
+  gex_source: "own" | "spx_map" | "unavailable";
+  call: ChainQuote | null;
+  put: ChainQuote | null;
+  atm: boolean;
+}
+
+export interface ChainView {
+  symbol: "SPX" | "XSP";
+  spot: number | null;
+  spx_equivalent_spot?: number;
+  expiry: string | null;
+  dte: number | null;
+  rows: ChainRow[];
+  gex_source: "own" | "spx_map" | "unavailable";
+  levels: Record<string, number | null>;
+  net_gex: number | null;
+  detail?: string;
+}

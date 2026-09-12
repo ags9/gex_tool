@@ -82,6 +82,9 @@ export const api = {
     get<{ prints: import("./types").TapePrint[];
           stats: import("./types").TapeStats }>(
       `/api/tape${q({ underlying, ...opts })}`, signal),
+  chain: (symbol = "SPX", dte = 3, strikes = 5, signal?: AbortSignal) =>
+    get<import("./types").ChainView>(
+      `/api/chain${q({ symbol, dte, strikes })}`, signal),
   underlyings: (signal?: AbortSignal) =>
     get<string[]>("/api/underlyings", signal),
   sessions: (limit = 30, signal?: AbortSignal) =>

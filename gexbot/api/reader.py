@@ -412,6 +412,53 @@ class StateReader:
                 return 0
         return int(v or 0)
 
+    def positions(self, *, open_only: bool = False) -> list[dict]:
+        """Paper positions the operator registered. Read-only, like everything
+        else here — the API cannot open or close one (CLAUDE.md §13)."""
+        if not self.exists:
+            return []
+        sql = "SELECT * FROM paper_position"
+        if open_only:
+            sql += " WHERE status = 'open'"
+        with _connect(self.path) as con:
+            return _dicts_optional(con, sql + " ORDER BY position_id DESC")
+
+    def shadow_fills(self, position_id: int) -> list[dict]:
+        if not self.exists:
+            return []
+        with _connect(self.path) as con:
+            return _dicts_optional(
+                con, "SELECT * FROM exit_shadow WHERE position_id=? "
+                     "ORDER BY shadow_id", [position_id])
+
+    def shadow_comparison(self, position_id: int | None = None) -> list[dict]:
+        """Per-position, per-policy totals (spec §3).
+
+        Spread is reported beside P&L rather than folded into it: the ladder
+        crosses the book once per tranche, and a ladder that wins on the P&L
+        headline while losing on the spread has not won (§2.6).
+        """
+        if not self.exists:
+            return []
+        sql = """SELECT position_id, policy,
+                        count(*)            AS fills,
+                        sum(contracts)      AS contracts,
+                        sum(pnl)            AS pnl,
+                        sum(spread_cost)    AS spread_cost,
+                        sum(commission)     AS commission,
+                        min(minute_of_day)  AS first_minute,
+                        max(minute_of_day)  AS last_minute,
+                        string_agg(rule, ' -> ' ORDER BY shadow_id) AS rules
+                 FROM exit_shadow"""
+        params: list = []
+        if position_id is not None:
+            sql += " WHERE position_id = ?"
+            params.append(position_id)
+        with _connect(self.path) as con:
+            return _dicts_optional(
+                con, sql + " GROUP BY position_id, policy "
+                           "ORDER BY position_id DESC, policy", params)
+
     def narration(self, poll_id: int) -> dict | None:
         if not self.exists:
             return None

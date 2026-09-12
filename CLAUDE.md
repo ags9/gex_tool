@@ -245,6 +245,7 @@ All commands: `python -m gexbot <cmd>`. Dates are ISO (`2024-01-02`).
 | `watch` | `--underlying {I:SPX,SPY}`, `--complex`, `--interval` (180s), `--expiries`, `--window`, `--tranche`, `--no-shadow`, `--no-flow`, `--once` | Structural alerts (09:00-16:15 ET) + shadow narration. REST chain snapshots plus the live WebSocket flow overlay. |
 | `explore` | — | Streamlit results explorer on `GEX_DASHBOARD_PORT`, bound 127.0.0.1. |
 | `watch --record-tape` | — | Writes every classified print to Parquet under `tape/date=…`. **Unbounded** — one investigation, never a default. |
+| `paper open/close/list` | `--symbol {SPX,XSP} --right --strike --contracts --premium --spot --target` | Register a PAPER position for the exit manager to shadow. Places nothing, reaches no broker. `list` prints all three §3 policies side by side. |
 | `premarket` | `--date`, `--dry-run` | Overnight SPY range vs the last stored map, posted to `#daily`. Descriptive only. |
 | *(ui)* | `cd ui && npm run dev` | Operator dashboard on `GEX_DASHBOARD_PORT` (8741), proxying to the API. Three screens: Live, Session, Research. Not a `gexbot` subcommand. |
 | `api` | `--port` (8742) | Read-only state API + `/ws/live`. Binds 127.0.0.1 with no host flag — there is deliberately no way to expose it. |
@@ -266,6 +267,15 @@ gexbot/
   instruments.py  SPX / SPY / COMPLEX definitions and the complex merge.
                   Strike ×10, per-point gamma ÷10 — opposite directions; the
                   reverse would inflate SPY 100× and dominate the merged map.
+  exitmgr.py      Exit manager (docs/EXIT_MANAGER_SPEC.md). Pure logic, and
+                  deliberately NOT exits.py — that module is Strategy C's
+                  frozen exit brain and merging them would couple a paper
+                  tool to the code whose signal-parity checks are the only
+                  forward test the project has. No entry logic, ever (§6).
+  shadow.py       Records THREE outcomes per position (§3): what the operator
+                  did, close-all-at-target, and the ladder. Recording one and
+                  not the others would be unrecoverable later.
+  chain.py        Entry-surface chain for SPX and XSP (§4).
   premarket.py    Overnight summary (§10.4). Descriptive only, by design.
   livefeed.py     …also TapeBuffer: the bounded print ring (§15). gamma_used
                   and dealer_gamma_delta are diagnostics — a lookup returning
@@ -371,6 +381,26 @@ live), ports 8741/8742. **Never commit `.env`; never send creds anywhere.**
 ## 9. Known gaps
 
 **Open**
+
+- **The exit manager is PAPER ONLY and has no write API.** Spec §4 asks for a
+  phone order ticket, but CLAUDE.md §13 gives the API no write path and the
+  spec's own §0 says "everything there still binds". Shadow mode (§3) does not
+  need one — the operator enters through his own broker and registers the
+  position with `gexbot paper open` — so the conflict is deferred, not
+  resolved. **Promotion to live management needs that decision made
+  explicitly**, along with the Schwab gateway (§5.1), Tailscale access (§5),
+  and broker-state reconciliation (§7); none of those is built.
+- **XSP publishes no option greeks.** Measured live: 0 of 2,918 contracts
+  carry `greeks.gamma`, so a gamma profile cannot be built from XSP's own
+  chain. The chain view shows the SPX map's gamma at the equivalent level,
+  tagged `gex_source: "spx_map"` and labelled in the UI. Unlike SPY, ×10 is
+  exact here — XSP is one tenth of the *same index* by contract definition and
+  carries no tracking basis.
+- **XSP spreads are much worse than SPX's**, which is the §2.6 cost the ladder
+  pays on every tranche. Measured on the same strikes: XSP calls at 5.86 /
+  6.75 / 6.38 against SPX at a uniform 0.40-0.50. The chain view flags any
+  spread over 15% of mid in amber. The shadow record counts spread per tranche
+  separately from P&L for the same reason.
 
 - **`tape_print` is in DuckDB, which §15.2 said not to do.** A deliberate,
   flagged deviation: the spec's stated reason is volume ("millions per

@@ -602,6 +602,46 @@ def _append_tape_parquet(underlying: str, batch: list) -> None:
         console.log(f"[yellow]tape record failed: {e}")
 
 
+def _step_exit_shadow(store, spot: float, key: str, underlying: str) -> None:
+    """Advance every open paper position's two bot policies by one tick.
+
+    State is rebuilt from stored fills each poll rather than held in memory,
+    so a restart cannot resume a half-filled ladder as though it were whole.
+    Failures here are logged and swallowed: a paper diagnostic must never take
+    down the poll loop that feeds the alerts.
+    """
+    try:
+        from .api.reader import StateReader
+        from .shadow import book_from_records
+
+        reader = StateReader(store.path)
+        open_positions = reader.positions(open_only=True)
+        if not open_positions:
+            return
+        minute = minute_now()
+        for row in open_positions:
+            fills = [f for f in reader.shadow_fills(row["position_id"])]
+            book = book_from_records(row, fills)
+            if book.all_closed:
+                continue
+            right = "call" if row["direction"] > 0 else "put"
+            expiry = row.get("expiry") or pick_expiry()
+            px = contract_price(underlying, float(row["strike"]), right,
+                                expiry, key)
+            if not px:
+                continue
+            mark, spread = px
+            new = book.step(minute=minute, spot=spot, mark=mark, spread=spread)
+            if new:
+                store.write_shadow_fills(row["position_id"], new)
+                for f in new:
+                    console.log(f"[cyan]shadow {f.policy.value}: "
+                                f"{f.rule.value} {f.contracts}c @ {f.fill_price:.2f} "
+                                f"→ ${f.pnl:+,.0f}")
+    except Exception as e:                     # never reaches the poll loop
+        console.log(f"[yellow]exit shadow step failed: {e}")
+
+
 # ── main loop ────────────────────────────────────────────────────────
 def run_watch(*, underlying: str = "I:SPX", interval: int = 180,
               expiries: int = 2, window: float = 0.06,
@@ -799,6 +839,12 @@ def run_watch(*, underlying: str = "I:SPX", interval: int = 180,
                     model="naive", per_point=True, underlying=primary)
                 if feed is not None and n.poll_id is not None:
                     store.write_premium(n.poll_id, ledger.premium_snapshot())
+
+                # Exit-manager shadow (spec §3). Paper only: this records
+                # what each policy WOULD have closed. It sends nothing, and
+                # it never touches the shadow BOOK above, which is Strategy
+                # C's narration and a different thing entirely.
+                _step_exit_shadow(store, prof["spot"], key, underlying)
                 # Structural narration is silent outside 09:00-16:15 ET. The
                 # poll itself is still recorded — the history should not have
                 # holes just because nobody wanted a phone notification — and
