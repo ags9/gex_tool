@@ -1,4 +1,4 @@
-import ReactECharts from "echarts-for-react";
+import { StableChart } from "./StableChart";
 import { useMemo, useState } from "react";
 
 import type { Level, Strike } from "../api/types";
@@ -366,12 +366,11 @@ export function StrikeProfile({ strikes, levels, spot, overlayOn, divisor,
         </div>
       </div>
 
-      <ReactECharts
+      <StableChart
         option={option}
         style={{ height: 520 }}
         notMerge
-        lazyUpdate
-        theme="dark"
+       
       />
 
       <p className="border-t border-neutral-800 px-4 py-2 text-xs text-neutral-600">

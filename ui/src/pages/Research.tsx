@@ -1,4 +1,4 @@
-import ReactECharts from "echarts-for-react";
+import { StableChart } from "../components/StableChart";
 import { useEffect, useMemo, useState } from "react";
 
 import { api, isAbort } from "../api/client";
@@ -127,8 +127,7 @@ function BundleView({ b }: { b: Bundle }) {
         {days.length === 0 ? (
           <p className="text-sm text-neutral-500">No day rows in this bundle.</p>
         ) : (
-          <ReactECharts
-            theme="dark"
+          <StableChart
             style={{ height: 300 }}
             notMerge
             option={{

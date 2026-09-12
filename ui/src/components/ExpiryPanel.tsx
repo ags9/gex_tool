@@ -1,4 +1,4 @@
-import ReactECharts from "echarts-for-react";
+import { StableChart } from "./StableChart";
 import { useEffect, useState } from "react";
 
 import { api, isAbort } from "../api/client";
@@ -112,7 +112,7 @@ export function ExpiryPanel({ pollId }: { pollId: number }) {
           )}
         </span>
       </div>
-      <ReactECharts option={option} style={{ height: 220 }} notMerge theme="dark" />
+      <StableChart option={option} style={{ height: 220 }} notMerge />
       <p className="border-t border-neutral-800 px-4 py-2 text-xs text-neutral-600">
         Bars: dealer gamma expiring on each date. Dashed line: share of current
         gamma still alive after it. OPEX marked from the exchange calendar.

@@ -1,4 +1,4 @@
-import ReactECharts from "echarts-for-react";
+import { StableChart } from "../components/StableChart";
 import { useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 
@@ -127,12 +127,10 @@ export default function Session() {
 
       {option && data && data.polls.length > 0 && (
         <section className="rounded-lg border border-neutral-800 bg-neutral-900/40 p-2">
-          <ReactECharts
+          <StableChart
             option={option}
             style={{ height: 1180 }}
             notMerge
-            lazyUpdate
-            theme="dark"
           />
         </section>
       )}

@@ -332,7 +332,11 @@ ui/               Vite + React + TS operator dashboard. Read-only.
   src/api/client.ts   parseUtc() — the API sends NAIVE UTC; new Date() would
                       read it as local time and mis-age every poll.
   src/api/useLive.ts  /ws/live socket: snapshot-first, reconnects forever.
-  src/components/     HealthStrip (staleness is computed client-side against
+  src/components/     StableChart — ECharts with a self-owned, SYNCHRONOUS
+                      lifecycle. Do not reintroduce echarts-for-react: its
+                      async init races a remount and silently leaves the
+                      container with no canvas (see §9).
+                      HealthStrip (staleness is computed client-side against
                       a ticking clock, because the health message is the
                       thing that stops arriving when something breaks).
 ```
@@ -378,28 +382,6 @@ live), ports 8741/8742. **Never commit `.env`; never send creds anywhere.**
   writes gigabytes a day to the drive, which is worse on exactly the axis the
   spec cares about. `--record-tape` remains the unbounded Parquet path and
   stays off. Revisit if the cap ever stops being enforced at write time.
-
-- **BUG: the strike profile chart intermittently creates no renderer.** The
-  container carries `_echarts_instance_` and a `zr-dom` child but **no
-  `<canvas>` element at all**, so nothing draws — it is not a data or option
-  fault. Measured and ruled out, in this order:
-  - NULLs in the series — none: 0/155 null across gex, oi_gex, flow_gex, dex,
-    volume.
-  - Duplicate or non-monotonic categories from the mixed 5/10/25-point strike
-    spacing — none: 155 labels, 155 distinct, strictly descending. (Spacing is
-    irrelevant to a category axis; the entries are ordinal.)
-  - The stacked series — reducing flow mode to a single series identical to
-    the working OI branch changes nothing.
-  - `dataZoom.filterMode` — set to `none`, no change.
-  - The §10.1 units divisor — fails at divisor 1 too.
-  - React StrictMode's double-mount — **a production build fails identically**,
-    so it is not the dev double-invoke.
-  - A thrown error — the console is clean.
-
-  The expiry panel, same library and same page, always renders. Next step is a
-  minimal ECharts repro of a category y-axis with ~155 entries, a value
-  x-axis, a `startValue`/`endValue` dataZoom and a markLine. Workaround: the
-  `OI` toggle, which renders reliably.
 
 - **SPY×10 is not SPX.** The ETF carries a persistent basis to the index
   (dividends, expense, tracking) — measured at ~0.2%, or ~15 SPX points,
@@ -470,6 +452,33 @@ live), ports 8741/8742. **Never commit `.env`; never send creds anywhere.**
   duplicate module. Tracked. Review and delete when convenient.
 
 **Fixed 2026-09-11** (kept here so the failure modes stay visible)
+
+- ~~The strike profile chart created no renderer~~ — the container kept its
+  `_echarts_instance_` attribute and a correctly-sized `zr-dom` child, but had
+  **no `<canvas>` at all**, so nothing drew. It read as a data or option fault
+  and was neither.
+  **Cause:** `echarts-for-react`'s init is asynchronous in a way that is easy
+  to miss (`core.js` → `initEchartsInstance`): it calls `echarts.init(ele)`,
+  waits for that instance's `'finished'` event, disposes it, and only then
+  re-inits with the measured size. When the component unmounts and remounts
+  inside that gap — React StrictMode guarantees it, and a parent switching
+  render branches causes it in production too — both component instances share
+  one `this.ele`, and the first one's pending `'finished'` handler disposes the
+  second one's instance.
+  **Found by** the one piece of direct evidence: a single console warning,
+  `[ECharts] Instance … has been disposed`. Instrumenting mount/unmount then
+  showed `mount #1 → UNMOUNT #1 → mount #2` on every load. Keying the element
+  does not help — StrictMode remounts the subtree onto the same DOM node, so
+  the key never changes.
+  **Fix:** `ui/src/components/StableChart.tsx` owns the lifecycle directly —
+  synchronous `echarts.init` / `dispose` in one effect, `setOption` in another,
+  `ResizeObserver` for reflow. `echarts-for-react` is uninstalled so the race
+  cannot be reintroduced by importing it again. Verified in dev and in a
+  production build: **101,411 bar pixels against 0 before.**
+  Two measurement traps met on the way, both worth remembering: a canvas pixel
+  probe run before `setOption` painted reported 330 and then 0 (the chart was
+  fine, the probe was early), and a stale `__pycache__` made a correctly
+  restored file look like it was still failing.
 
 - ~~The live flow overlay never reached the profile~~ — `watch.py` called
   `levels.build_profile` and never `livefeed.combine`, so the map it alerted
