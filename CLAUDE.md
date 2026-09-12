@@ -244,6 +244,7 @@ All commands: `python -m gexbot <cmd>`. Dates are ISO (`2024-01-02`).
 | `levels` | `--underlying` (I:SPX), `--model {naive,short_all}`, `--expiries` (2), `--window` (0.06), `--per-1pct` | Print today's GEX map from a live chain snapshot. |
 | `watch` | `--underlying`, `--interval` (180s), `--expiries`, `--window`, `--tranche`, `--no-shadow`, `--no-flow`, `--once` | Structural alerts (09:00-16:15 ET) + shadow narration. REST chain snapshots plus the live WebSocket flow overlay. |
 | `explore` | — | Streamlit results explorer on `GEX_DASHBOARD_PORT`, bound 127.0.0.1. |
+| *(ui)* | `cd ui && npm run dev` | Operator dashboard on `GEX_DASHBOARD_PORT` (8741), proxying to the API. Not a `gexbot` subcommand. **Port 8741 is also claimed by `explore.py`** until it is retired in build step 5. |
 | `api` | `--port` (8742) | Read-only state API + `/ws/live`. Binds 127.0.0.1 with no host flag — there is deliberately no way to expose it. |
 | `discord-test` | — | Send one test message to each configured webhook. |
 
@@ -307,6 +308,14 @@ gexbot/
                   storage problem. THE connection helper lives here.
   api/reader.py   Read-only queries over that store + backtest bundles.
   api/app.py      FastAPI: /api/* REST and /ws/live. No write path anywhere.
+
+ui/               Vite + React + TS operator dashboard (Phase 3). Read-only.
+  src/api/client.ts   parseUtc() — the API sends NAIVE UTC; new Date() would
+                      read it as local time and mis-age every poll.
+  src/api/useLive.ts  /ws/live socket: snapshot-first, reconnects forever.
+  src/components/     HealthStrip (staleness is computed client-side against
+                      a ticking clock, because the health message is the
+                      thing that stops arriving when something breaks).
 ```
 
 **Key defaults** (`SimConfig` / `EntryParams` / `CParams` / `CostParams` /
@@ -339,6 +348,14 @@ live), ports 8741/8742. **Never commit `.env`; never send creds anywhere.**
 ## 9. Known gaps
 
 **Open**
+
+- **Phase 3 UI is at build step 1 of 5** (`docs/PHASE3_UI_SPEC.md` §7):
+  scaffold, API client, WS hook, health strip. The `App.tsx` "live wire"
+  panel is scaffolding to prove the socket and is replaced by the strike
+  profile in step 2, not kept.
+- **Port 8741 is contested.** `explore.py` (Streamlit) and the new UI both
+  want `GEX_DASHBOARD_PORT`. Until `explore.py` is retired (step 5), run the
+  dev server with `GEX_DASHBOARD_PORT=8743`.
 
 - **`docs/HANDOFF.md` does not exist** — not on disk, not in git history —
   yet `watch.py:11` cites "HANDOFF §2" as the canonical account of the two

@@ -1,0 +1,9 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  font-variant-numeric: tabular-nums;
+}
