@@ -1,4 +1,15 @@
-import type { Alert, Health, LatestPoll, Poll, ShadowTrade } from "./types";
+import type {
+  Alert,
+  Bundle,
+  BundleSummary,
+  Health,
+  Heatmap,
+  LatestPoll,
+  Poll,
+  Premium,
+  SessionSummary,
+  ShadowTrade,
+} from "./types";
 
 /**
  * Parse a timestamp from the API as UTC.
@@ -45,6 +56,30 @@ export const api = {
     get<Alert[]>(`/api/session/${date}/alerts`, signal),
   trades: (date: string, signal?: AbortSignal) =>
     get<ShadowTrade[]>(`/api/session/${date}/trades`, signal),
+  premium: (date: string, signal?: AbortSignal) =>
+    get<Premium[]>(`/api/session/${date}/premium`, signal),
+  heatmap: (date: string, signal?: AbortSignal) =>
+    get<Heatmap>(`/api/session/${date}/heatmap`, signal),
+  sessions: (limit = 30, signal?: AbortSignal) =>
+    get<SessionSummary[]>(`/api/sessions?limit=${limit}`, signal),
+  bundles: (signal?: AbortSignal) =>
+    get<BundleSummary[]>("/api/backtests", signal),
+  bundle: (name: string, signal?: AbortSignal) =>
+    get<Bundle>(`/api/backtests/${encodeURIComponent(name)}`, signal),
 };
+
+/** A cancelled request is not a failure. StrictMode aborts the first pass of
+ *  every effect in dev, and surfacing that as an error banner reports the
+ *  framework's own behaviour as a server fault. */
+export function isAbort(e: unknown): boolean {
+  // Not `instanceof DOMException`: the abort reason crosses realms in dev and
+  // the name is the only thing reliably present.
+  return (
+    typeof e === "object" &&
+    e !== null &&
+    ((e as { name?: string }).name === "AbortError" ||
+      String((e as { message?: string }).message ?? "").includes("aborted"))
+  );
+}
 
 export { ApiError };

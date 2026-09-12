@@ -114,6 +114,15 @@ def create_app(db_path=None, results_root=None) -> FastAPI:
         poll["as_of"] = poll["ts"]
         return poll
 
+    @app.get("/api/session/{date}/premium")
+    async def session_premium(date: str):
+        return await asyncio.to_thread(reader.premium, _date(date))
+
+    @app.get("/api/session/{date}/heatmap")
+    async def session_heatmap(date: str, underlying: str | None = Query(None)):
+        return await asyncio.to_thread(reader.strike_matrix, _date(date),
+                                       underlying)
+
     @app.get("/api/session/{date}/alerts")
     async def session_alerts(date: str):
         return await asyncio.to_thread(reader.alerts, _date(date))

@@ -180,6 +180,33 @@ def contract_price(underlying: str, strike: float, right: str,
     return None
 
 
+def contract_greeks(underlying: str, strike: float, right: str,
+                    expiry: dt.date, key: str) -> dict | None:
+    """Greeks for an ALREADY-CHOSEN contract.
+
+    Deliberately separate from `contract_price` rather than folded into it.
+    Contract selection is frozen (CLAUDE.md §3), and the safest way to keep it
+    frozen is for the greeks path to be code that selection never calls: this
+    runs after the strike and expiry are already decided, and its result is
+    written to the store and read by nothing.
+    """
+    occ = (f"O:SPXW{expiry:%y%m%d}{'C' if right == 'call' else 'P'}"
+           f"{int(round(strike * 1000)):08d}")
+    try:
+        r = httpx.get(f"{BASE}/v3/snapshot/options/{underlying}/{occ}"
+                      f"?apiKey={key}", timeout=20)
+        if r.status_code != 200:
+            return None
+        res = (r.json() or {}).get("results") or {}
+        g = res.get("greeks") or {}
+        out = {"delta": g.get("delta"), "gamma": g.get("gamma"),
+               "theta": g.get("theta"), "vega": g.get("vega"),
+               "iv": res.get("implied_volatility")}
+        return out if any(v is not None for v in out.values()) else None
+    except httpx.HTTPError:
+        return None
+
+
 # ── alert composition ────────────────────────────────────────────────
 FLIP_HYSTERESIS = 0.0015      # 0.15% band around the flip
 FLIP_CONFIRM_POLLS = 2        # must hold for two consecutive polls
@@ -514,8 +541,9 @@ def do_shadow(n: AlertSink, prof: dict, st: WatchState, key: str,
         st.open_trade["trade_id"] = store.open_shadow_trade(
             direction=direction, strike=strike, expiry=expiry,
             contracts=contracts, trigger=p["trigger"], level=p["level"],
-            entry_spot=spot, entry_premium=mid,
-            underlying=underlying) if store else None
+            entry_spot=spot, entry_premium=mid, underlying=underlying,
+            greeks=contract_greeks(underlying, strike, right, expiry, key),
+        ) if store else None
         n.send(Channel.TRADES,
                f"{SHADOW_TAG} would BUY SPX {strike:,.0f}{'C' if direction>0 else 'P'} "
                f"exp {expiry:%-m/%-d/%Y}",
@@ -605,6 +633,14 @@ def run_watch(*, underlying: str = "I:SPX", interval: int = 180,
 
     while True:
         m = minute_now()
+        # Session rollover: watch_state and the flow ledger both hold
+        # session-to-date totals, and carrying yesterday's into today would be
+        # a lie in every panel that reads them.
+        day_now = dt.date.today().isoformat()
+        if st.day != day_now:
+            console.log(f"[bold]new session {day_now} — resetting state")
+            st = WatchState(day=day_now)
+            ledger.reset()
         if not once and not (SESSION_OPEN - 30 <= m <= SESSION_CLOSE + 5):
             time.sleep(60)
             continue
@@ -646,6 +682,8 @@ def run_watch(*, underlying: str = "I:SPX", interval: int = 180,
                                 if feed is not None else None),
                     poll_ms=int((time.monotonic() - t0) * 1000),
                     model="naive", per_point=True, underlying=underlying)
+                if feed is not None and n.poll_id is not None:
+                    store.write_premium(n.poll_id, ledger.premium_snapshot())
                 # Structural narration is silent outside 09:00-16:15 ET. The
                 # poll itself is still recorded — the history should not have
                 # holes just because nobody wanted a phone notification — and

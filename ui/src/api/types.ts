@@ -131,3 +131,61 @@ export type LiveMessage =
   | { type: "alert"; data: Alert }
   | { type: "trade"; data: ShadowTrade }
   | { type: "health"; data: Health };
+
+export interface Premium {
+  poll_id: number;
+  ts: string;
+  session_date: string;
+  minute_of_day: number;
+  call_bought: number;
+  call_sold: number;
+  put_bought: number;
+  put_sold: number;
+  trades_counted: number;
+  unclassified: number;
+}
+
+export interface Heatmap {
+  minutes: number[];
+  strikes: number[];
+  /** [minute, strike, gex] — long form: strikes drift in and out of the
+   *  window, so a dense matrix would have to invent values for the holes. */
+  cells: [number, number, number][];
+}
+
+export interface SessionSummary {
+  session_date: string;
+  polls: number;
+  trades: number;
+  shadow_pnl: number;
+  alerts: number;
+  first_minute: number;
+  last_minute: number;
+}
+
+export interface BundleSummary {
+  name: string;
+  has_gates: boolean;
+  modified: string;
+  gate_params?: Record<string, number> | null;
+  go_live_eligible?: boolean;
+}
+
+export interface MarkProvenance {
+  file: number;
+  rest: number;
+  model_fallback: number;
+  total: number;
+  fallback_pct: number | null;
+}
+
+export interface Bundle {
+  name: string;
+  gates: Record<string, { passed: boolean; detail: string }> | null;
+  gate_params: Record<string, number> | null;
+  /** null = the bundle predates provenance recording. Not 0% fallback. */
+  mark_provenance: MarkProvenance | null;
+  summary_md: string | null;
+  days: Record<string, unknown>[];
+  trades: Record<string, unknown>[];
+}

@@ -75,8 +75,6 @@ def main() -> None:
     ir.add_argument("--start", type=dt.date.fromisoformat, default=settings.gex_start_date)
     ir.add_argument("--end", type=dt.date.fromisoformat, default=settings.end_date)
 
-    sub.add_parser("explore", help="launch the results explorer UI (Streamlit, localhost)")
-
     ap = sub.add_parser("api", help="serve the read-only state API (localhost only)")
     ap.add_argument("--port", type=int, default=settings.gex_api_port,
                     help="default %(default)s (GEX_API_PORT)")
@@ -177,14 +175,6 @@ def main() -> None:
                       once=args.once, flow=not args.no_flow)
         except KeyboardInterrupt:
             console.print("\n[yellow]watch stopped (state saved).")
-    elif args.cmd == "explore":
-        import subprocess, sys
-        from pathlib import Path as _P
-        app = _P(__file__).parent / "explore.py"
-        subprocess.run([sys.executable, "-m", "streamlit", "run", str(app),
-                        "--server.port", str(settings.gex_dashboard_port),
-                        "--server.address", "127.0.0.1",
-                        "--browser.gatherUsageStats", "false"])
     elif args.cmd == "api":
         from .api import run_api
         run_api(port=args.port)

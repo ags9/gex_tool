@@ -105,6 +105,11 @@ def run_backtest(start: dt.date, end: dt.date, *, tranche: float = 3000.0,
         })
 
     total_marks = rb.file_marks + rb.rest_marks + rb.fallback_marks
+    provenance = {
+        "file": rb.file_marks, "rest": rb.rest_marks,
+        "model_fallback": rb.fallback_marks, "total": total_marks,
+        "fallback_pct": (100.0 * rb.fallback_marks / total_marks) if total_marks else None,
+    }
     if total_marks:
         pct = 100.0 * rb.fallback_marks / total_marks
         colour = "green" if pct < 5 else ("yellow" if pct < 25 else "red")
@@ -116,9 +121,13 @@ def run_backtest(start: dt.date, end: dt.date, *, tranche: float = 3000.0,
                       skipped, out_dir, gp)
     (out_dir / "summary.md").write_text(summary)
     # Nested shape: the thresholds that judged this run travel WITH the
-    # verdicts, so a bundle is self-describing. explore.py reads both shapes.
+    # verdicts, so a bundle is self-describing. Readers accept both shapes.
+    # Persisted, not just printed: a bundle reviewed weeks later has to be
+    # able to say how much of its P&L rested on model prices rather than real
+    # quotes. The console line vanishes; the bundle is the record.
     (out_dir / "gates.json").write_text(json.dumps({
         "gate_params": asdict(gp),
+        "mark_provenance": provenance,
         "gates": {k: {"passed": v[0], "detail": v[1]} for k, v in gates.items()},
     }, indent=2))
     console.print(f"\n[bold]Results bundle:[/bold] {out_dir}")

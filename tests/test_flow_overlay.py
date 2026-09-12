@@ -214,3 +214,60 @@ def test_watch_builds_the_overlay_without_touching_the_network(
         assert oi_net is not None and connected is True
         assert con.execute("SELECT count(*) FROM poll_strike "
                            "WHERE flow_gex IS NULL").fetchone()[0] == 0
+
+
+# ── premium accumulator (spec §5) ────────────────────────────────────
+def test_premium_keeps_bought_and_sold_apart():
+    """Unsigned totals conflate 'paid $9.6M for puts' with 'sold $9.6M of
+    puts', which are opposite positions."""
+    led = FlowLedger()
+    led.add_premium("C", size=10, price=5.0, side=1)     # bought 5,000
+    led.add_premium("C", size=4, price=5.0, side=-1)     # sold   2,000
+    led.add_premium("P", size=6, price=2.0, side=1)      # bought 1,200
+    led.add_premium("P", size=20, price=2.0, side=-1)    # sold   4,000
+
+    p = led.premium_snapshot()
+    assert (p["call_bought"], p["call_sold"]) == (5000.0, 2000.0)
+    assert (p["put_bought"], p["put_sold"]) == (1200.0, 4000.0)
+    assert p["trades_counted"] == 4 and p["unclassified"] == 0
+    # deliberately unequal: equal buy and sell volumes cancel and would let a
+    # broken net pass unnoticed
+    assert p["call_bought"] != p["call_sold"]
+    assert p["put_bought"] != p["put_sold"]
+
+
+def test_unclassified_prints_are_counted_not_dropped_or_guessed():
+    led = FlowLedger()
+    led.add_premium("C", size=10, price=5.0, side=0)
+    led.add_premium("P", size=10, price=5.0, side=0)
+    p = led.premium_snapshot()
+    assert p["unclassified"] == 2
+    assert p["trades_counted"] == 0
+    assert p["call_bought"] == p["call_sold"] == 0.0, "a zero-tick picks no side"
+
+
+def test_reset_clears_session_to_date_premium():
+    led = FlowLedger()
+    led.add_premium("C", size=10, price=5.0, side=1)
+    led.add_premium("C", size=1, price=1.0, side=0)
+    led.reset()
+    p = led.premium_snapshot()
+    assert p == {"call_bought": 0.0, "call_sold": 0.0, "put_bought": 0.0,
+                 "put_sold": 0.0, "trades_counted": 0, "unclassified": 0}
+
+
+def test_feed_routes_every_print_to_premium_including_zero_ticks():
+    """The gamma path skips unclassified prints by design; premium must not,
+    or the unclassified count is a lie."""
+    from gexbot.livefeed import OptionsFeed
+
+    led = FlowLedger()
+    feed = OptionsFeed("k", led, gamma_fn=lambda *a: GAMMA, spot_fn=lambda: 7600.0)
+    t = "O:SPXW260914C07650000"
+    for px in (12.0, 12.4, 12.4):      # none, uptick, zero-tick(inherits +1)
+        feed._handle({"ev": "T", "sym": t, "p": px, "s": 10})
+
+    p = led.premium_snapshot()
+    assert p["unclassified"] == 1, "the first print has no prior to compare to"
+    assert p["trades_counted"] == 2
+    assert p["call_bought"] > 0

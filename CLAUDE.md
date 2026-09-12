@@ -55,7 +55,7 @@ forms."*
 ### What is nonetheless solid
 
 A pipeline that survives 7-billion-row days; ledgers, greeks, entry/exit/
-discipline engines (125 tests passing *(verify)*); honest REST NBBO marks
+discipline engines (129 tests passing *(verify)*); honest REST NBBO marks
 with provenance tracking; a backtest runner with era splits and executable
 gates; a four-arm control harness; put-call-parity spot reconstruction for
 pre-2023; Discord alerting; a results explorer. None of this is invalidated
@@ -244,7 +244,7 @@ All commands: `python -m gexbot <cmd>`. Dates are ISO (`2024-01-02`).
 | `levels` | `--underlying` (I:SPX), `--model {naive,short_all}`, `--expiries` (2), `--window` (0.06), `--per-1pct` | Print today's GEX map from a live chain snapshot. |
 | `watch` | `--underlying`, `--interval` (180s), `--expiries`, `--window`, `--tranche`, `--no-shadow`, `--no-flow`, `--once` | Structural alerts (09:00-16:15 ET) + shadow narration. REST chain snapshots plus the live WebSocket flow overlay. |
 | `explore` | — | Streamlit results explorer on `GEX_DASHBOARD_PORT`, bound 127.0.0.1. |
-| *(ui)* | `cd ui && npm run dev` | Operator dashboard on `GEX_DASHBOARD_PORT` (8741), proxying to the API. Not a `gexbot` subcommand. **Port 8741 is also claimed by `explore.py`** until it is retired in build step 5. |
+| *(ui)* | `cd ui && npm run dev` | Operator dashboard on `GEX_DASHBOARD_PORT` (8741), proxying to the API. Three screens: Live, Session, Research. Not a `gexbot` subcommand. |
 | `api` | `--port` (8742) | Read-only state API + `/ws/live`. Binds 127.0.0.1 with no host flag — there is deliberately no way to expose it. |
 | `discord-test` | — | Send one test message to each configured webhook. |
 
@@ -301,7 +301,6 @@ gexbot/
                   shuffled_levels.
   notify.py       Discord, 3 tiers, fire-and-forget, drop-oldest.
   watch.py        Market-hours monitor + shadow narration.
-  explore.py      Streamlit results explorer. Read-only by design.
   state.py        Durable record of every poll/alert/shadow trade (DuckDB).
                   Writers only; connect-per-operation; every write swallows
                   and counts its own failures so the engine never dies of a
@@ -312,7 +311,9 @@ gexbot/
                   footer computed by the ENGINE's own functions — the UI is
                   forbidden from re-deriving any of them (spec §0).
 
-ui/               Vite + React + TS operator dashboard (Phase 3). Read-only.
+ui/               Vite + React + TS operator dashboard. Read-only.
+  src/pages/          Live (strike profile + rail), Session (4 linked panels),
+                      Research (backtest bundles; replaced explore.py).
   src/api/client.ts   parseUtc() — the API sends NAIVE UTC; new Date() would
                       read it as local time and mis-age every poll.
   src/api/useLive.ts  /ws/live socket: snapshot-first, reconnects forever.
@@ -335,7 +336,7 @@ flat 15:50, max 3 trades/day (5 on range days), 2 losing trades ends the day,
 ```bash
 uv venv && source .venv/bin/activate && uv pip install -e ".[dev]"
 cp .env.example .env          # fill Massive keys + GEX_DATA_ROOT
-python -m pytest -q           # 125 passing
+python -m pytest -q           # 129 passing
 ruff check .                  # line-length 100
 ```
 
@@ -352,18 +353,23 @@ live), ports 8741/8742. **Never commit `.env`; never send creds anywhere.**
 
 **Open**
 
-- **Phase 3 UI is at build step 2 of 5** (`docs/PHASE3_UI_SPEC.md` §7):
-  Screen 1 (strike profile + right rail) is built. Steps 3-5 — `poll_premium`,
-  Screen 2, Screen 3 — are not.
 - **`docs/PHASE3_UI_SPEC.md` has no §10.** The `underlying` column was built
   from a one-line instruction, not a written spec; the design choices are in
-  the commit message and may need correcting.
+  commit d502ff6 and may need correcting.
+- **Screen 2 has only been seen with synthetic data.** The real store holds a
+  handful of after-hours polls and no premium rows, so the session panels were
+  verified against a seeded throwaway database. A real session is needed.
+- **`shadow_trade` records entry greeks (delta/gamma/theta/vega/IV) and
+  nothing reads them.** That is deliberate: they exist so a later review can
+  ask what the book was exposed to. Wiring them into selection would breach
+  CLAUDE.md §3 — the code that would do it is frozen.
 - **The `volume` source toggle is inert**, and shown disabled with a reason.
   Per-strike day volume is not stored anywhere, and spec §0 forbids showing a
   number we cannot source. It needs a store column before it can work.
-- **Port 8741 is contested.** `explore.py` (Streamlit) and the new UI both
-  want `GEX_DASHBOARD_PORT`. Until `explore.py` is retired (step 5), run the
-  dev server with `GEX_DASHBOARD_PORT=8743`.
+- **`explore.py` is retired** (replaced by the Research screen) and the
+  streamlit dependency is dropped. A Streamlit process started 2026-09-08 may
+  still be holding port 8741; stop it with
+  `kill $(lsof -t -iTCP:8741 -sTCP:LISTEN)`.
 
 - **`docs/HANDOFF.md` does not exist** — not on disk, not in git history —
   yet `watch.py:11` cites "HANDOFF §2" as the canonical account of the two

@@ -224,3 +224,96 @@ Stop after each numbered step and show the result.
 Auth, remote/Lightsail deployment, Docker, mobile layout, the design pass,
 any greeks panel beyond gamma (vanna/charm exposure may come later, labelled
 as exposure — never as a recommendation), and anything that forecasts.
+
+---
+
+## 10. Addendum — SPY and the S&P complex
+
+The operator marks levels in SPY and trades SPX. The system currently sees
+neither: `ReplayBuilder` filters to `("SPX","SPXW")`, `OptionsFeed`
+subscribes only to `T.O:SPX*`/`T.O:SPXW*`, and `levels.py` fetches the
+`I:SPX` chain. SPY options are downloaded in the historical archive and then
+discarded.
+
+Three distinct things follow. Build 10.1 and 10.2; keep 10.3 behind a flag.
+
+### 10.1 SPY-scaled display of the SPX map
+
+A display transform only: strikes, spot, and level labels divided by 10,
+gamma values unchanged in dollars. Same underlying computation, presented in
+the units the operator reads.
+
+- UI: a `SPX / SPY units` toggle on the header strip. Persisted per user.
+- Never mix: if units are SPY, every strike on screen is SPY-scaled,
+  including the right rail, trend axes, and heatmap rows.
+- This is NOT a SPY gamma map, and the UI must not imply it is. Label the
+  toggle `units`, not `instrument`.
+
+### 10.2 Standalone SPY GEX map
+
+SPY's own chain, own open interest, own gamma profile. SPY walls sit at
+genuinely different strikes than SPX walls — this is a second map, not a
+rescaling of the first.
+
+- `levels.py` already takes an `underlying`; verify it works with `"SPY"`
+  (equity chains carry `underlying_asset.price`, so the index-spot fallback
+  should not be needed) and that per-point units are right at SPY's price
+  scale.
+- `watch.py` gains `--underlying` plumbed through to the engine, and the
+  live feed subscribes `T.O:SPY*` when SPY is selected.
+- Storage: `poll_snapshot` and `poll_strike` gain an `underlying VARCHAR
+  NOT NULL DEFAULT 'I:SPX'` column, part of the primary key alongside
+  `poll_id`. Existing rows backfill to `I:SPX`. Every API session endpoint
+  takes `?underlying=` and defaults to `I:SPX`.
+- UI: an **instrument selector** — `SPX · SPY · combined` — distinct from
+  the units toggle in 10.1. Selecting SPY shows SPY's own map with its own
+  levels.
+
+### 10.3 Combined S&P complex ledger (flagged, measured)
+
+Dealers hedge S&P exposure as one book, so SPX + SPXW + SPY gamma arguably
+belong in one profile, with SPY contracts scaled to SPX notional (÷10 on
+strike, gamma weighted accordingly).
+
+This is a **model change**: it moves walls, shifts the flip, and can change
+regime calls. Whether the combined map is more predictive than SPX-only is
+an empirical question, and "more complete" is not self-evidently "better".
+
+Therefore:
+
+- Implemented behind `--complex` / instrument selector value `combined`,
+  never as a default.
+- When `combined` is selected, the store writes rows with
+  `underlying = 'COMPLEX'` — a third series, not an overwrite. SPX-only
+  and SPY-only maps continue to be computed and stored in parallel during
+  any session where combined is enabled, so the comparison record
+  accumulates automatically.
+- No alerting from the combined map until the comparison has been reviewed.
+  `watch.py` alerts continue to fire from `I:SPX`.
+- Comparison question, to be answered from the accumulated record, not by
+  eye: over N sessions, do combined-map levels coincide with turning points
+  more often than SPX-only levels? Specify the test before reading the
+  data, per `PREREGISTRATION.md` §2.
+
+### 10.4 Overnight / pre-market summary
+
+The operator manually checks which levels were touched after hours. The bot
+cannot help today: `watch` sleeps outside 09:00–16:15 and OI is static
+overnight anyway.
+
+Build a pre-market job (~08:45 ET) posting to `#daily`:
+
+- Overnight range, from a session-extended source (SPY extended hours via
+  aggregates is sufficient; ES futures would need a Massive Futures
+  subscription — do not add one for this).
+- Which of the prior session's computed levels were touched or breached
+  overnight, using the last stored `poll_strike` profile of that session.
+- Where spot sits relative to that map at the open, in points and percent.
+
+Strictly descriptive. No implication about what the touch means.
+
+### 10.5 Cost
+
+None. SPY options are OPRA, already covered by the Options Advanced
+subscription; the chain snapshot endpoint is the same. No new entitlement,
+no backfill — SPY trades are already on disk from 2021.

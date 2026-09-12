@@ -16,6 +16,8 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import duckdb
+
 from ..clock import ET
 from ..config import settings
 from ..state import connect, default_path
@@ -44,6 +46,16 @@ def _dicts(con, sql: str, params: list | None = None) -> list[dict]:
     cur = con.execute(sql, params or [])
     cols = [d[0] for d in cur.description]
     return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def _dicts_optional(con, sql: str, params: list | None = None) -> list[dict]:
+    """For tables a store may predate. A reader that 500s because the engine
+    has not yet created a table is reporting its own age as a server fault;
+    an empty list is the truthful answer — there are no rows."""
+    try:
+        return _dicts(con, sql, params)
+    except duckdb.CatalogException:
+        return []
 
 
 @dataclass
@@ -283,6 +295,40 @@ class StateReader:
             poll["context"] = self.context(poll, poll["strikes"], con)
         return poll
 
+    def premium(self, session_date: dt.date) -> list[dict]:
+        """Cumulative premium by side through the session (spec §3.3)."""
+        if not self.exists:
+            return []
+        with _connect(self.path) as con:
+            return _dicts_optional(
+                con, "SELECT * FROM poll_premium WHERE session_date=? "
+                     "ORDER BY poll_id", [session_date])
+
+    def strike_matrix(self, session_date: dt.date,
+                      underlying: str | None = None) -> dict:
+        """Long-form (minute, strike, gex) for the heatmap (spec §3.4).
+
+        Returned long rather than pivoted: strikes drift in and out of the
+        window across a session, so a dense matrix would have to invent a
+        value for every hole. The client places what exists and leaves the
+        rest blank.
+        """
+        if not self.exists:
+            return {"minutes": [], "strikes": [], "cells": []}
+        where, params = ("", [session_date])
+        if underlying:
+            where, params = (" AND p.underlying = ?", [session_date, underlying])
+        with _connect(self.path) as con:
+            rows = con.execute(
+                f"""SELECT p.minute_of_day, s.strike, s.gex
+                    FROM poll_strike s JOIN poll_snapshot p USING (poll_id)
+                    WHERE p.session_date = ?{where}
+                    ORDER BY p.minute_of_day, s.strike""", params).fetchall()
+        minutes = sorted({r[0] for r in rows})
+        strikes = sorted({r[1] for r in rows})
+        return {"minutes": minutes, "strikes": strikes,
+                "cells": [[r[0], r[1], r[2]] for r in rows]}
+
     def alerts(self, session_date: dt.date) -> list[dict]:
         if not self.exists:
             return []
@@ -444,12 +490,16 @@ class BundleReader:
         if not str(d).startswith(str(self.root.resolve())) or not d.is_dir():
             return None
         out: dict = {"name": d.name, "gates": None, "gate_params": None,
-                     "summary_md": None, "days": [], "trades": []}
+                     "mark_provenance": None, "summary_md": None,
+                     "days": [], "trades": []}
         gates = d / "gates.json"
         if gates.exists():
             blob = json.loads(gates.read_text())
             out["gates"] = blob.get("gates", blob)
             out["gate_params"] = blob.get("gate_params")
+            # None means the bundle predates provenance recording — shown as
+            # "not recorded", never as 0% fallback.
+            out["mark_provenance"] = blob.get("mark_provenance")
         summary = d / "summary.md"
         if summary.exists():
             out["summary_md"] = summary.read_text()

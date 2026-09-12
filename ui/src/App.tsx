@@ -1,46 +1,47 @@
-import { useLive, useNow } from "./api/useLive";
-import { HealthStrip } from "./components/HealthStrip";
-import { RightRail } from "./components/RightRail";
-import { StrikeProfile } from "./components/StrikeProfile";
+import { NavLink, Navigate, Route, Routes } from "react-router-dom";
 
-/** Screen 1 — Live (spec §2). */
+import { todayEt } from "./components/minute";
+import Live from "./pages/Live";
+import Research from "./pages/Research";
+import Session from "./pages/Session";
+
 export default function App() {
-  const live = useLive();
-  const now = useNow();
-  const { poll } = live;
-
-  // The overlay is "on" only when the split is actually present. NULL means
-  // it was off for this poll, which is a different fact from zero flow.
-  const overlayOn = Boolean(
-    poll && poll.oi_net !== null && poll.flow_net !== null,
-  );
-
   return (
     <div className="min-h-screen">
-      <HealthStrip live={live} now={now} />
+      <nav className="flex items-center gap-1 border-b border-neutral-800 bg-neutral-950 px-4 py-1.5 text-xs">
+        <Tab to="/">Live</Tab>
+        <Tab to={`/session/${todayEt()}`}>Session</Tab>
+        <Tab to="/research">Research</Tab>
+        <span className="ml-auto text-neutral-700">
+          read-only · localhost
+        </span>
+      </nav>
 
-      <main className="p-4">
-        {!poll ? (
-          <p className="p-8 text-center text-sm text-neutral-500">
-            No poll recorded yet — start the engine with{" "}
-            <code className="text-neutral-400">python -m gexbot watch</code>.
-          </p>
-        ) : !poll.context ? (
-          <p className="p-8 text-center text-sm text-neutral-500">
-            Waiting for a full snapshot…
-          </p>
-        ) : (
-          <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
-            <StrikeProfile
-              strikes={poll.strikes}
-              levels={poll.context.levels}
-              spot={poll.spot}
-              overlayOn={overlayOn}
-            />
-            <RightRail poll={poll} />
-          </div>
-        )}
-      </main>
+      <Routes>
+        <Route path="/" element={<Live />} />
+        <Route path="/session" element={<Navigate to={`/session/${todayEt()}`} replace />} />
+        <Route path="/session/:date" element={<Session />} />
+        <Route path="/research" element={<Research />} />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
     </div>
+  );
+}
+
+function Tab({ to, children }: { to: string; children: React.ReactNode }) {
+  return (
+    <NavLink
+      to={to}
+      end={to === "/"}
+      className={({ isActive }) =>
+        `rounded px-3 py-1.5 transition-colors ${
+          isActive
+            ? "bg-neutral-800 text-neutral-100"
+            : "text-neutral-500 hover:bg-neutral-900 hover:text-neutral-300"
+        }`
+      }
+    >
+      {children}
+    </NavLink>
   );
 }

@@ -76,6 +76,13 @@ class FlowLedger:
     contracts_seen: int = 0
     trades_seen: int = 0
     last_trade_ts: float = 0.0
+    # cumulative session-to-date premium, four buckets (spec §3.3)
+    call_bought: float = 0.0
+    call_sold: float = 0.0
+    put_bought: float = 0.0
+    put_sold: float = 0.0
+    premium_trades: int = 0
+    unclassified: int = 0
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def add(self, strike: float, size: int, side: int, gamma: float,
@@ -90,6 +97,38 @@ class FlowLedger:
             self.trades_seen += 1
             self.last_trade_ts = time.time()
 
+    def add_premium(self, right: str, size: int, price: float, side: int) -> None:
+        """Accumulate premium into four buckets, keeping bought and sold apart.
+
+        Unsigned totals conflate "paid $9.6M for puts" with "sold $9.6M of
+        puts", which are opposite positions. Zero-tick prints that inherit no
+        direction land in `unclassified` rather than being silently dropped or
+        guessed into a side — the count is surfaced so a session with poor
+        classification is visibly less meaningful.
+        """
+        dollars = price * size * 100.0
+        with self._lock:
+            if not side:
+                self.unclassified += 1
+                return
+            self.premium_trades += 1
+            if right == "C":
+                if side > 0:
+                    self.call_bought += dollars
+                else:
+                    self.call_sold += dollars
+            elif side > 0:
+                self.put_bought += dollars
+            else:
+                self.put_sold += dollars
+
+    def premium_snapshot(self) -> dict:
+        with self._lock:
+            return {"call_bought": self.call_bought, "call_sold": self.call_sold,
+                    "put_bought": self.put_bought, "put_sold": self.put_sold,
+                    "trades_counted": self.premium_trades,
+                    "unclassified": self.unclassified}
+
     def snapshot(self) -> dict[float, float]:
         with self._lock:
             return dict(self.gamma_by_strike)
@@ -102,9 +141,14 @@ class FlowLedger:
         return time.time() - self.last_trade_ts if self.last_trade_ts else float("inf")
 
     def reset(self) -> None:
+        """Called on a session-date rollover: these are session-to-date
+        totals, and carrying yesterday's into today would be a lie."""
         with self._lock:
             self.gamma_by_strike.clear()
             self.contracts_seen = self.trades_seen = 0
+            self.call_bought = self.call_sold = 0.0
+            self.put_bought = self.put_sold = 0.0
+            self.premium_trades = self.unclassified = 0
 
 
 # ── websocket feed ───────────────────────────────────────────────────
@@ -180,13 +224,16 @@ class OptionsFeed:
         if not ticker or price is None or size <= 0:
             return
         side = self.classifier.classify(ticker, float(price))
-        if not side:
-            return
         parsed = _parse(ticker)
         if not parsed:
             return
         root, expiry, right, strike = parsed
         if root not in self.roots:
+            return
+        # Premium counts every print in our roots, side or no side: the
+        # unclassified tally is only honest if the zero-ticks reach it.
+        self.ledger.add_premium(right, size, float(price), side)
+        if not side:
             return
         gamma = self.gamma_fn(strike, right, expiry)
         if gamma:

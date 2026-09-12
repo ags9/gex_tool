@@ -124,6 +124,19 @@ CREATE TABLE IF NOT EXISTS alert_log (
     strike           DOUBLE
 );
 
+CREATE TABLE IF NOT EXISTS poll_premium (
+    poll_id          BIGINT PRIMARY KEY,
+    ts               TIMESTAMP NOT NULL,
+    session_date     DATE NOT NULL,
+    minute_of_day    INTEGER NOT NULL,
+    call_bought      DOUBLE NOT NULL,
+    call_sold        DOUBLE NOT NULL,
+    put_bought       DOUBLE NOT NULL,
+    put_sold         DOUBLE NOT NULL,
+    trades_counted   BIGINT NOT NULL,
+    unclassified     BIGINT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS shadow_trade (
     trade_id         BIGINT PRIMARY KEY,
     underlying       VARCHAR NOT NULL DEFAULT 'I:SPX',
@@ -143,7 +156,16 @@ CREATE TABLE IF NOT EXISTS shadow_trade (
     exit_spot        DOUBLE,
     exit_premium     DOUBLE,
     exit_reason      VARCHAR,
-    pnl              DOUBLE
+    pnl              DOUBLE,
+    -- Greeks as they stood at entry. RECORDED, NEVER USED FOR SELECTION:
+    -- nothing reads these back into a trading decision, and CLAUDE.md §3
+    -- freezes the code that would. They exist so a later review can ask what
+    -- the book was actually exposed to, which the strike alone cannot say.
+    entry_delta      DOUBLE,
+    entry_gamma      DOUBLE,
+    entry_theta      DOUBLE,
+    entry_vega       DOUBLE,
+    entry_iv         DOUBLE
 );
 """
 
@@ -170,6 +192,9 @@ MIGRATIONS = (
     f"WHERE underlying IS NULL",
     f"UPDATE shadow_trade SET underlying = '{DEFAULT_UNDERLYING}' "
     f"WHERE underlying IS NULL",
+    *(f"ALTER TABLE shadow_trade ADD COLUMN IF NOT EXISTS {c} DOUBLE"
+      for c in ("entry_delta", "entry_gamma", "entry_theta", "entry_vega",
+                "entry_iv")),
 )
 
 # poll_strike deliberately has NO underlying column: it reaches one through
@@ -303,6 +328,40 @@ class StateStore:
             self._note(e, "write_poll")
             return None
 
+    def write_premium(self, poll_id: int, premium: dict,
+                      ts: dt.datetime | None = None) -> bool:
+        """Cumulative session-to-date premium by side (spec §5).
+
+        Four totals, not two: "paid $9.6M for puts" and "sold $9.6M of puts"
+        are opposite facts and an unsigned total conflates them. `unclassified`
+        rides along because zero-tick prints that inherit no direction are
+        excluded from all four — if that count is large the panel means less,
+        and the operator has to be able to see that.
+        """
+        if not self.available or poll_id is None:
+            return False
+        ts = ts or _utcnow()
+        try:
+            with connect(self.path) as con:
+                con.execute(
+                    """INSERT OR REPLACE INTO poll_premium
+                       (poll_id, ts, session_date, minute_of_day, call_bought,
+                        call_sold, put_bought, put_sold, trades_counted,
+                        unclassified)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    [poll_id, ts.replace(tzinfo=None), session_date_of(ts),
+                     minute_of(ts),
+                     float(premium.get("call_bought", 0.0)),
+                     float(premium.get("call_sold", 0.0)),
+                     float(premium.get("put_bought", 0.0)),
+                     float(premium.get("put_sold", 0.0)),
+                     int(premium.get("trades_counted", 0)),
+                     int(premium.get("unclassified", 0))])
+            return True
+        except Exception as e:
+            self._note(e, "write_premium")
+            return False
+
     def write_alert(self, *, channel: str, kind: str, title: str, body: str,
                     poll_id: int | None = None, spot: float | None = None,
                     strike: float | None = None,
@@ -336,7 +395,11 @@ class StateStore:
                           level: float | None, entry_spot: float,
                           entry_premium: float,
                           underlying: str = DEFAULT_UNDERLYING,
+                          greeks: dict | None = None,
                           ts: dt.datetime | None = None) -> int | None:
+        """`greeks` is recorded and never read back into a decision — see the
+        column comment in SCHEMA. Passing None records NULLs rather than
+        zeros: an unavailable greek is not a delta of zero."""
         if not self.available:
             return None
         ts = ts or _utcnow()
@@ -347,12 +410,17 @@ class StateStore:
                     """INSERT INTO shadow_trade
                        (trade_id, underlying, session_date, direction, strike,
                         expiry, contracts, trigger, level, entry_ts,
-                        entry_minute, entry_spot, entry_premium)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        entry_minute, entry_spot, entry_premium,
+                        entry_delta, entry_gamma, entry_theta, entry_vega,
+                        entry_iv)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     [tid, underlying, session_date_of(ts), direction, float(strike),
                      expiry, int(contracts), trigger, level,
                      ts.replace(tzinfo=None), minute_of(ts),
-                     float(entry_spot), float(entry_premium)])
+                     float(entry_spot), float(entry_premium),
+                     *( (g.get("delta"), g.get("gamma"), g.get("theta"),
+                         g.get("vega"), g.get("iv"))
+                        if (g := greeks or None) else (None,) * 5 )])
             return tid
         except Exception as e:
             self._note(e, "open_shadow_trade")
