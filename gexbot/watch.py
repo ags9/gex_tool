@@ -592,7 +592,7 @@ def _append_tape_parquet(underlying: str, batch: list) -> None:
     try:
         pl.DataFrame([{
             "ts": p.ts, "ticker": p.ticker, "root": p.root, "expiry": p.expiry,
-            "strike": p.strike, "right": p.right, "price": p.price,
+            "strike": p.strike, "option_right": p.right,   # matches tape_print "price": p.price,
             "size": p.size, "side": p.side, "premium": p.premium,
             "gamma_used": p.gamma_used,
             "dealer_gamma_delta": p.dealer_gamma_delta,

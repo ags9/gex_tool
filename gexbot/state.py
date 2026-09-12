@@ -162,7 +162,7 @@ CREATE TABLE IF NOT EXISTS tape_print (
     root               VARCHAR NOT NULL,
     expiry             VARCHAR NOT NULL,
     strike             DOUBLE NOT NULL,
-    opt_right          VARCHAR NOT NULL,   -- "right" is a reserved word (RIGHT JOIN)
+    option_right       VARCHAR NOT NULL,   -- see RESERVED_COLUMN_NAMES below
     price              DOUBLE NOT NULL,
     size               BIGINT NOT NULL,
     side               INTEGER NOT NULL,     -- +1 buy, -1 sell, 0 unclassified
@@ -244,6 +244,27 @@ DEFAULT_UNDERLYING = "I:SPX"
 # ⚙ Ring size per instrument, matching the in-memory buffer on the feed.
 TAPE_CAP = 2000
 
+# Words DuckDB rejects as BARE column identifiers — measured against the
+# engine, not recalled. `right` is the one that bit us: it failed schema
+# creation outright, which cascaded into 30 test failures.
+#
+# The fix is always to rename the column, never to quote it. A quoted
+# identifier works but only for as long as every future query remembers the
+# quotes, and the one that forgets fails at runtime rather than at schema
+# creation. A name that needs no quoting cannot be got wrong.
+#
+# Note `range` is NOT reserved in DuckDB, despite looking like it should be.
+RESERVED_COLUMN_NAMES = frozenset({
+    "all", "and", "any", "as", "asc", "case", "cast", "check", "collate",
+    "column", "constraint", "create", "default", "desc", "describe",
+    "distinct", "else", "end", "except", "from", "full", "glob", "group",
+    "having", "in", "inner", "intersect", "into", "is", "join", "left",
+    "like", "limit", "natural", "not", "null", "offset", "on", "or", "order",
+    "outer", "pivot", "primary", "qualify", "references", "returning",
+    "right", "select", "similar", "some", "summarize", "symmetric", "table",
+    "then", "union", "unique", "unpivot", "using", "when", "where", "window",
+})
+
 # Applied after SCHEMA on every open. DuckDB's ADD COLUMN IF NOT EXISTS is
 # idempotent and backfills existing rows with the default, so a store written
 # before this column existed migrates in place on the next engine start —
@@ -284,6 +305,28 @@ ALERT_KINDS = ("regime_flip", "flip_cross", "proximity", "map",
                "shadow_entry", "shadow_exit", "digest", "warning")
 
 
+# (old name, new name) pairs applied before SCHEMA, so a store written by an
+# earlier build is migrated in place rather than left with a stale column the
+# queries no longer reference.
+_COLUMN_RENAMES = (("tape_print", "opt_right", "option_right"),)
+
+
+def _rename_legacy_columns(con) -> None:
+    """Idempotent: checks information_schema first, since ALTER ... RENAME
+    COLUMN has no IF EXISTS and would fail on a store already migrated."""
+    for table, old, new in _COLUMN_RENAMES:
+        try:
+            present = con.execute(
+                """SELECT count(*) FROM information_schema.columns
+                   WHERE table_name = ? AND column_name = ?""",
+                [table, old]).fetchone()[0]
+            if present:
+                con.execute(f"ALTER TABLE {table} RENAME COLUMN {old} TO {new}")
+                console.log(f"[dim]migrated {table}.{old} -> {new}")
+        except Exception as e:                  # never block the engine
+            console.log(f"[yellow]column rename {table}.{old} failed: {e}")
+
+
 def _utcnow() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
 
@@ -318,6 +361,7 @@ class StateStore:
         try:
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
             with connect(self.path) as con:
+                _rename_legacy_columns(con)
                 con.execute(SCHEMA)
                 for stmt in MIGRATIONS:
                     con.execute(stmt)

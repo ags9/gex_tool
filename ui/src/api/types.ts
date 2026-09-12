@@ -218,7 +218,7 @@ export interface TapePrint {
   root: string;
   expiry: string;
   strike: number;
-  opt_right: string;
+  option_right: string;
   price: number;
   size: number;
   side: number;            // +1 buy, -1 sell, 0 unclassified

@@ -314,6 +314,9 @@ gexbot/
   notify.py       Discord, 3 tiers, fire-and-forget, drop-oldest.
   watch.py        Market-hours monitor + shadow narration.
   state.py        Durable record of every poll/alert/shadow trade (DuckDB).
+                  RESERVED_COLUMN_NAMES + _rename_legacy_columns(): column
+                  names are checked against DuckDB's grammar by a test, and
+                  a renamed column migrates old stores in place on open.
                   Writers only; connect-per-operation; every write swallows
                   and counts its own failures so the engine never dies of a
                   storage problem. THE connection helper lives here.
@@ -541,7 +544,15 @@ live), ports 8741/8742. **Never commit `.env`; never send creds anywhere.**
      changed.** A non-matching pattern is a silent no-op; three instances so
      far were exactly this (one left an axis unconverted, one dropped a `dex`
      column from a SELECT, one produced a schema with a missing comma).
-  7. **A lint or schema check governs form, not truth.** The narration lint
+  7. **Never quote a reserved identifier — rename it.** `right` is reserved in
+     DuckDB (RIGHT JOIN) and failed schema creation outright. Quoting works,
+     but only for as long as every future query remembers the quotes, and the
+     one that forgets fails at runtime rather than at schema creation. The
+     measured list is `state.RESERVED_COLUMN_NAMES` and two tests hold it:
+     one asserts no schema column is in it, the other asserts the list still
+     matches what DuckDB actually rejects. Note `range` is *not* reserved,
+     despite looking like it should be — the list was measured, not recalled.
+  8. **A lint or schema check governs form, not truth.** The narration lint
      passes text that inverts the gamma mechanic. Anything the model could
      state backwards is templated in code, not asked for — and anything it is
      told not to write is also *removed* after the fact, because an

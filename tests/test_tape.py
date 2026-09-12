@@ -142,10 +142,80 @@ def test_stats_survive_the_ring_trimming_the_prints_they_counted(tmp_path: Path)
 
 
 def test_right_column_is_not_a_reserved_word(tmp_path: Path):
-    """`right` is RIGHT JOIN in DuckDB; the column is opt_right so no query
+    """`right` is RIGHT JOIN in DuckDB; the column is option_right so no query
     has to quote it."""
     store = StateStore(tmp_path / "s.duckdb")
     assert store.available and store.write_tape([mk(0)], "I:SPX") == 1
     with duckdb.connect(str(tmp_path / "s.duckdb"), read_only=True) as con:
         cols = [r[1] for r in con.execute("PRAGMA table_info(tape_print)").fetchall()]
-    assert "opt_right" in cols and "right" not in cols
+    assert "option_right" in cols and "right" not in cols
+
+
+def test_a_store_written_with_the_old_column_migrates_in_place(tmp_path: Path):
+    """An earlier build named this opt_right. Opening the store renames it
+    rather than leaving a column the queries no longer reference."""
+    db = tmp_path / "legacy.duckdb"
+    with duckdb.connect(str(db)) as con:
+        con.execute("""CREATE TABLE tape_print (
+            seq BIGINT PRIMARY KEY, underlying VARCHAR NOT NULL,
+            ts TIMESTAMP NOT NULL, session_date DATE NOT NULL,
+            minute_of_day INTEGER NOT NULL, ticker VARCHAR NOT NULL,
+            root VARCHAR NOT NULL, expiry VARCHAR NOT NULL,
+            strike DOUBLE NOT NULL, opt_right VARCHAR NOT NULL,
+            price DOUBLE NOT NULL, size BIGINT NOT NULL, side INTEGER NOT NULL,
+            premium DOUBLE NOT NULL, gamma_used DOUBLE NOT NULL,
+            dealer_gamma_delta DOUBLE NOT NULL)""")
+        con.execute("INSERT INTO tape_print VALUES (1,'I:SPX',now(),DATE '2026-09-11',"
+                    "660,'T','SPXW','260914',7650.0,'C',10.0,5,1,5000.0,0.003,-100.0)")
+
+    store = StateStore(db)                      # opening migrates
+    assert store.available
+    with duckdb.connect(str(db), read_only=True) as con:
+        cols = [r[1] for r in con.execute("PRAGMA table_info(tape_print)").fetchall()]
+        kept = con.execute("SELECT option_right FROM tape_print").fetchone()
+    assert "option_right" in cols and "opt_right" not in cols
+    assert kept == ("C",), "the existing row survives the rename"
+    # idempotent: a second open must not fail on an already-renamed store
+    assert StateStore(db).available
+
+
+def test_no_schema_column_is_a_duckdb_reserved_word():
+    """The durable guard. `right` failed schema creation outright and cascaded
+    into 30 test failures; this catches the next one at commit time instead.
+
+    Renaming is the fix, never quoting: a quoted identifier works only for as
+    long as every future query remembers the quotes, and the query that
+    forgets fails at runtime rather than at schema creation.
+    """
+    import re
+
+    from gexbot.state import RESERVED_COLUMN_NAMES, SCHEMA
+
+    offenders = []
+    for table, body in re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)\s*\((.*?)\n\);",
+                                  SCHEMA, re.S):
+        for line in body.splitlines():
+            line = line.strip()
+            if not line or line.startswith("--"):
+                continue
+            if line.upper().startswith(("PRIMARY KEY", "UNIQUE", "FOREIGN", "CHECK")):
+                continue
+            name = line.split()[0].strip('",')
+            if name.lower() in RESERVED_COLUMN_NAMES:
+                offenders.append(f"{table}.{name}")
+    assert not offenders, f"reserved column names in SCHEMA: {offenders}"
+
+
+def test_the_reserved_word_list_matches_what_duckdb_actually_rejects():
+    """Measured, not recalled. If a DuckDB upgrade changes the grammar this
+    fails here rather than in a schema creation six months later."""
+    from gexbot.state import RESERVED_COLUMN_NAMES
+
+    con = duckdb.connect()
+    for word in sorted(RESERVED_COLUMN_NAMES):
+        with pytest.raises(Exception):
+            con.execute(f"CREATE OR REPLACE TEMP TABLE probe ({word} INTEGER)")
+    # and a control: a word we rely on NOT being reserved
+    for ok in ("range", "size", "side", "price", "strike", "expiry", "premium",
+               "value", "type", "date", "level", "position", "key"):
+        con.execute(f"CREATE OR REPLACE TEMP TABLE probe_ok ({ok} INTEGER)")

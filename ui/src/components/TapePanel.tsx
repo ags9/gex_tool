@@ -180,7 +180,7 @@ function Row({ p, threshold }: { p: TapePrint; threshold: number | null }) {
         })}
       </td>
       <td className="px-2 py-0.5">{price(p.strike)}</td>
-      <td className="px-2 py-0.5 text-neutral-400">{p.opt_right}</td>
+      <td className="px-2 py-0.5 text-neutral-400">{p.option_right}</td>
       <td className="px-2 py-0.5">{p.size.toLocaleString()}</td>
       <td className="px-2 py-0.5">{p.price.toFixed(2)}</td>
       <td className="px-2 py-0.5 text-neutral-400">

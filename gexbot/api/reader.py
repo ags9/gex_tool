@@ -364,7 +364,7 @@ class StateReader:
             sql += " AND strike = ?"
             params.append(float(strike))
         if right:
-            sql += " AND opt_right = ?"
+            sql += " AND option_right = ?"
             params.append(right.upper()[:1])
         if side is not None:
             sql += " AND side = ?"
