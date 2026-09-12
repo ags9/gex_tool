@@ -485,3 +485,113 @@ From the reference posts that prompted this addendum:
   from an SPX decision; no validated use).
 - Dark pool prints (midpoint executions have no aggressor side, so
   direction is unknowable; needs a Stocks subscription).
+# Spec §15 — Classified tape
+
+Appends to `docs/PHASE3_UI_SPEC.md`. Constraints unchanged: `CLAUDE.md` §3
+(strategy frozen), §0 (no directional claims, no forecasts, no unsourced
+numbers).
+
+---
+
+## 15.1 What this is
+
+A live feed of individual option prints — the classified trades already
+flowing through `OptionsFeed` — displayed in sequence rather than
+aggregated into the gamma profile.
+
+The ledger answers "what is the dealer position now." The tape answers
+"what just happened, in what order, at what size." Same input stream,
+different processing. The aggregation is lossy by design; this is the
+unaggregated view.
+
+It is also a diagnostic. Today there is no way to see what the classifier
+is doing — a tick rule that silently returns 0 for most prints, or a gamma
+lookup returning 0 (the exact trap caught during the flow wiring), would
+produce a flat overlay that looks like a quiet market. The tape makes that
+visible immediately.
+
+## 15.2 Data
+
+Already arriving. `OptionsFeed._handle` parses ticker, price, size, and
+computes a side; nothing retains the print.
+
+Add a bounded in-memory ring buffer on the feed — ⚙2,000 most recent
+classified prints, per instrument:
+
+```
+print: ts, ticker, root, expiry, strike, right, price, size,
+       side (+1 buy / -1 sell / 0 unclassified),
+       premium (price × size × 100),
+       gamma_used (the value the lookup returned, 0 if missed),
+       dealer_gamma_delta (the signed contribution written to the ledger)
+```
+
+`gamma_used` and `dealer_gamma_delta` are the diagnostic columns — they show
+whether a print actually moved the map or was silently dropped.
+
+**Not persisted to DuckDB by default.** SPX prints run to millions per
+session; storing them duplicates the flat-file archive that already exists
+and would dwarf every other table. A `--record-tape` flag may write a
+session's prints to Parquet under `{GEX_DATA_ROOT}/tape/date=…` for a
+specific investigation, off by default.
+
+## 15.3 API
+
+```
+GET  /api/tape?underlying=&limit=&min_size=&strike=&right=&side=
+       -> most recent prints, newest first, filtered
+WS   /ws/live  -> new message type:
+       { "type": "prints", "data": [ ...batch since last push... ] }
+```
+
+Batch prints on the existing 1 s push rather than streaming each one — a
+per-print socket message on SPX would flood the browser.
+
+## 15.4 Display
+
+A panel on Screen 1, collapsed by default.
+
+- Newest at top. Columns: time, strike, right, size, price, premium, side.
+- Side shown by symbol and colour: `▲` buy, `▼` sell, `·` unclassified.
+  Never colour alone — the unclassified case must be visually distinct, not
+  merely absent.
+- Rows at or beyond the ⚙2,000-contract block threshold (`C.12`) are
+  emphasised; the same threshold the block-flow tracker uses, read from the
+  API rather than duplicated in the UI.
+- Filters: minimum size, strike, right, side.
+- A header line shows, for the visible session: prints seen, contracts,
+  **unclassified count and percentage**, and **gamma-lookup misses**. Those
+  last two are the honesty numbers — if either is large, the flow overlay is
+  less meaningful than it looks and the operator should see that on the same
+  screen as the map.
+
+## 15.5 What it must not do
+
+- No inference. The panel shows prints. It does not label a sequence as
+  "absorption", "aggression", "sweeps", or "institutional" — those are
+  readings, and this project has no validated basis for any of them.
+- No aggregate implying consequence — e.g. no "buy pressure" gauge. The
+  premium panel (§3.3) already shows classified totals factually; that is
+  the aggregate view.
+- No sound, no flashing. A tape that demands attention competes with the
+  alerts, which are the thing that actually earned the right to interrupt.
+
+Context for §15.5, for future sessions: tape reading has a long folklore
+tradition and thin published evidence. Order-flow imbalance does precede
+short-term movement in the microstructure literature, but the retail
+practice of forming impressions from scrolling prints is much weaker than
+practitioners claim — and this system's own control tests found its
+flow-derived entry logic did not beat random out-of-sample. Showing the
+prints is useful; interpreting them on the operator's behalf is not
+something we can currently justify.
+
+## 15.6 Acceptance
+
+- With the engine running during market hours, prints appear within ~2 s of
+  the WebSocket receiving them.
+- Unclassified percentage and gamma-miss count are visible without opening
+  a menu.
+- Memory is bounded: the ring buffer does not grow past its cap over a full
+  session.
+- Nothing under `gexbot/` implementing entries, exits, discipline, sizing,
+  or contract selection is modified.
