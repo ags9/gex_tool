@@ -55,7 +55,7 @@ forms."*
 ### What is nonetheless solid
 
 A pipeline that survives 7-billion-row days; ledgers, greeks, entry/exit/
-discipline engines (93 tests passing *(verify)*); honest REST NBBO marks
+discipline engines (112 tests passing *(verify)*); honest REST NBBO marks
 with provenance tracking; a backtest runner with era splits and executable
 gates; a four-arm control harness; put-call-parity spot reconstruction for
 pre-2023; Discord alerting; a results explorer. None of this is invalidated
@@ -213,7 +213,16 @@ and **starts a fresh holdout**. Never edit `PREREGISTRATION.md` in place.
     backtest analyzer reads. No dashboard-only calculations.
 16. Shadow/paper output is always visually tagged (📄) and carries the
     disclaimer. A phone glance must never confuse simulated with real.
-17. Backfill halts itself if drive free space drops under 200 GB. At most one
+    Every *structural* alert also carries `position_footer` — the point is
+    that no message leaves you guessing what the shadow book holds.
+17. **Structural alerts must not fire on noise.** Each one needs a dead zone,
+    two-poll confirmation, and a cooldown before it reaches a phone; regime
+    calls additionally refuse to name a regime at all when |net GEX| is
+    inside the dead zone (`regime_of` returns `""`, meaning *no information*,
+    never a third regime). Alerting is silent outside 09:00-16:15 ET, though
+    the poll is still recorded. An alert that fires on noise trains you to
+    ignore the one that matters.
+18. Backfill halts itself if drive free space drops under 200 GB. At most one
     raw day ever sits on disk — raw files are deleted immediately after
     conversion.
 
@@ -253,7 +262,9 @@ gexbot/
                   No hardcoded paths/ports/parameters anywhere else.
   clock.py        THE timezone authority. UTC ns <-> ET minute-of-day via
                   zoneinfo, scalar + vectorized + inverse. Never reintroduce a
-                  hardcoded UTC offset; import from here.
+                  hardcoded UTC offset; import from here. watch.minute_now()
+                  routes through it too — every gate in watch.py is ET, not
+                  machine-local.
   pipeline.py     S3 flat-file download → filtered zstd Parquet. KEYS = S3 templates.
   manifest.py     DuckDB manifest; makes backfill resumable.
   symbols.py      OCC root parsing.
@@ -309,7 +320,7 @@ flat 15:50, max 3 trades/day (5 on range days), 2 losing trades ends the day,
 ```bash
 uv venv && source .venv/bin/activate && uv pip install -e ".[dev]"
 cp .env.example .env          # fill Massive keys + GEX_DATA_ROOT
-python -m pytest -q           # 93 passing
+python -m pytest -q           # 112 passing
 ruff check .                  # line-length 100
 ```
 

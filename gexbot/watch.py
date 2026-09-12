@@ -27,6 +27,7 @@ from pathlib import Path
 import httpx
 from rich.console import Console
 
+from .clock import ET
 from .config import settings
 from .levels import BASE, build_profile, fetch_chain, fetch_index_spot
 from .notify import Channel, Color, DiscordNotifier
@@ -101,6 +102,10 @@ class ShadowTrade:
 class WatchState:
     day: str = ""
     last_regime: str = ""
+    peak_abs_net: float = 0.0        # session's largest |net GEX|, sets the dead zone
+    pending_regime: str = ""
+    pending_regime_count: int = 0
+    last_regime_alert_ts: float = 0.0
     last_side_of_flip: str = ""
     pending_flip_side: str = ""
     pending_flip_count: int = 0
@@ -127,7 +132,11 @@ class WatchState:
 
 # ── helpers ──────────────────────────────────────────────────────────
 def minute_now() -> int:
-    t = dt.datetime.now()
+    """Exchange minute-of-day, via the clock module rather than the machine's
+    local time. Every gate in this file — the alert window, the shadow entry
+    cutoff, the 15:50 flat — is defined in ET; reading the wall clock instead
+    silently shifts all of them on a box in another timezone."""
+    t = dt.datetime.now(dt.timezone.utc).astimezone(ET)
     return t.hour * 60 + t.minute
 
 
@@ -172,6 +181,48 @@ def contract_price(underlying: str, strike: float, right: str,
 FLIP_HYSTERESIS = 0.0015      # 0.15% band around the flip
 FLIP_CONFIRM_POLLS = 2        # must hold for two consecutive polls
 FLIP_COOLDOWN_S = 3600        # at most one flip alert per hour
+
+# Regime calls get the same treatment as flip crossings, for the same reason:
+# the sign of net GEX is meaningless when net GEX is near zero, and a book
+# hovering around the boundary would otherwise announce a "regime flip" every
+# few minutes. The dead zone is relative to the session's own largest reading
+# — the same 5%-of-running-scale rule replay.py already uses to label regimes,
+# so the live engine and the replay harness agree on what a regime IS, which
+# is what makes signal-parity checks meaningful.
+#
+# The absolute floor exists because the relative rule is useless early, when
+# the peak is itself tiny. ⚙ 25M is a judgement call on thin evidence: the one
+# live poll recorded so far sat at net -12.3M with individual strikes at ±9M,
+# i.e. aggregate noise — and it fired a regime-flip alert. Raise or lower it
+# from the recorded history once there is some; it shapes alerts only and
+# touches no entry, exit, sizing or discipline behaviour.
+REGIME_DEAD_ZONE_FRAC = 0.05   # of the session's largest |net GEX| so far
+REGIME_MIN_ABS_GEX = 25e6      # ⚙ absolute floor for calling a regime at all
+REGIME_CONFIRM_POLLS = 2       # must hold for two consecutive polls
+REGIME_COOLDOWN_S = 3600       # at most one regime alert per hour
+
+# Structural alerts are silent outside these ET bounds. The chain snapshot
+# still returns data after hours, so without this the engine narrates a
+# stale book to a phone at 20:00.
+ALERT_WINDOW_START = 9 * 60          # 09:00 ET
+ALERT_WINDOW_END = 16 * 60 + 15      # 16:15 ET
+
+
+def in_alert_window(minute: int | None = None) -> bool:
+    m = minute_now() if minute is None else minute
+    return ALERT_WINDOW_START <= m <= ALERT_WINDOW_END
+
+
+def regime_of(net: float, peak_abs_net: float) -> str:
+    """POSITIVE / NEGATIVE, or "" when |net| is too small to mean anything.
+
+    "" is not a third regime — it is the absence of a call, and callers must
+    treat it as "no information", never as a transition.
+    """
+    dead = max(REGIME_MIN_ABS_GEX, REGIME_DEAD_ZONE_FRAC * peak_abs_net)
+    if abs(net) < dead:
+        return ""
+    return "POSITIVE" if net > 0 else "NEGATIVE"
 
 
 def flip_context(side: str) -> str:
@@ -255,8 +306,13 @@ def position_footer(prof: dict, st: "WatchState") -> str:
     return f"\n\n**📄 Shadow position:** flat — {why}{done}"
 
 
-def post_map(n: AlertSink, prof: dict) -> None:
-    """First poll of the session: today's structure, one card."""
+def post_map(n: AlertSink, prof: dict, st: WatchState) -> None:
+    """First poll of the session: today's structure, one card.
+
+    Carries the position footer like every other structural alert — the
+    footer's whole purpose is that no message leaves you guessing what the
+    shadow book is holding.
+    """
     spot, net, flip = prof["spot"], prof["net"], prof.get("flip")
     rows = sorted(prof["by_strike"].items(), key=lambda kv: -abs(kv[1]))[:6]
     lines = [f"`{k:>7,.0f}`  {fmt_m(v):>8}" for k, v in
@@ -267,22 +323,44 @@ def post_map(n: AlertSink, prof: dict) -> None:
            f"**Flip:** {f'{flip:,.0f}' if flip else 'none in window'}\n"
 + _level_lines(prof) +
            "Largest gamma strikes:\n" + "\n".join(lines) + "\n\n"
-           + regime_context(net),
+           + regime_context(net)
+           + position_footer(prof, st),
            Color.BLUE, kind="map", spot=spot)
 
 
 def structural_alerts(n: AlertSink, prof: dict, st: WatchState) -> None:
     spot, net, flip = prof["spot"], prof["net"], prof.get("flip")
 
-    # regime flip
-    regime = "POSITIVE" if net > 0 else "NEGATIVE"
-    if st.last_regime and regime != st.last_regime:
-        n.send(Channel.ALERTS, f"Regime flip → {regime} gamma",
-               f"Net GEX {fmt_m(net)} (was {st.last_regime}).\n{regime_context(net)}",
-               Color.AMBER,
-               [("spot", f"{spot:,.0f}"), ("flip", f"{flip:,.0f}" if flip else "—")],
-               kind="regime_flip", spot=spot)
-    st.last_regime = regime
+    # regime flip — dead zone, then persistence, then a cooldown. Without all
+    # three a book sitting near net-zero announces a flip every few minutes,
+    # and the sign it announces carries no information.
+    st.peak_abs_net = max(st.peak_abs_net, abs(net))
+    regime = regime_of(net, st.peak_abs_net)
+
+    if not regime or regime == st.last_regime:
+        # inside the dead zone, or nothing changed: forget any pending call
+        st.pending_regime, st.pending_regime_count = "", 0
+    elif not st.last_regime:
+        # first real reading of the session: adopt it as the baseline, but do
+        # not announce a "flip" from nothing
+        st.last_regime = regime
+        st.pending_regime, st.pending_regime_count = "", 0
+    elif regime == st.pending_regime:
+        st.pending_regime_count += 1
+        if st.pending_regime_count >= REGIME_CONFIRM_POLLS:
+            if time.time() - st.last_regime_alert_ts > REGIME_COOLDOWN_S:
+                n.send(Channel.ALERTS, f"Regime flip → {regime} gamma",
+                       f"Net GEX {fmt_m(net)} (was {st.last_regime}).\n"
+                       f"Spot {spot:,.0f}"
+                       + (f"  ·  flip {flip:,.0f}" if flip else "")
+                       + f"\n{regime_context(net)}"
+                       + position_footer(prof, st),
+                       Color.AMBER, kind="regime_flip", spot=spot)
+                st.last_regime_alert_ts = time.time()
+            st.last_regime = regime
+            st.pending_regime, st.pending_regime_count = "", 0
+    else:
+        st.pending_regime, st.pending_regime_count = regime, 1
 
     # flip crossing — needs distance (hysteresis), persistence, and a cooldown.
     # Without these the flip drifts with spot and the side oscillates on noise.
@@ -519,10 +597,15 @@ def run_watch(*, underlying: str = "I:SPX", interval: int = 180,
                 n.poll_id = store.write_poll(
                     prof, poll_ms=int((time.monotonic() - t0) * 1000),
                     model="naive", per_point=True)
-                if not st.posted_open_map:
-                    post_map(n, prof)
-                    st.posted_open_map = True
-                structural_alerts(n, prof, st)
+                # Structural narration is silent outside 09:00-16:15 ET. The
+                # poll itself is still recorded — the history should not have
+                # holes just because nobody wanted a phone notification — and
+                # the shadow book keeps its own, tighter time gates.
+                if in_alert_window(m):
+                    if not st.posted_open_map:
+                        post_map(n, prof, st)
+                        st.posted_open_map = True
+                    structural_alerts(n, prof, st)
                 if shadow:
                     do_shadow(n, prof, st, key, underlying, tranche, store)
                 st.save(state_path)
