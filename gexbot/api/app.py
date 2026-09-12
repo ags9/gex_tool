@@ -116,6 +116,19 @@ def create_app(db_path=None, results_root=None) -> FastAPI:
         poll["as_of"] = poll["ts"]
         return poll
 
+    @app.get("/api/tape")
+    async def tape(underlying: str | None = Query(None),
+                   limit: int = Query(200, ge=1, le=2000),
+                   min_size: int | None = Query(None, ge=1),
+                   strike: float | None = Query(None),
+                   right: str | None = Query(None, pattern="^[CPcp]$"),
+                   side: int | None = Query(None, ge=-1, le=1)):
+        prints = await asyncio.to_thread(
+            reader.tape, underlying, limit=limit, min_size=min_size,
+            strike=strike, right=right, side=side)
+        stats = await asyncio.to_thread(reader.tape_stats, underlying)
+        return {"prints": prints, "stats": stats}
+
     @app.get("/api/session/expiry")
     async def session_expiry(poll_id: int = Query(...)):
         return await asyncio.to_thread(reader.expiries, poll_id)
@@ -195,6 +208,7 @@ def create_app(db_path=None, results_root=None) -> FastAPI:
         await ws.accept()
         underlying = ws.query_params.get("underlying") or None
         last_poll, last_alert = await asyncio.to_thread(reader.max_ids, underlying)
+        last_seq = await asyncio.to_thread(reader.max_tape_seq, underlying)
         trade_state: dict[int, object] = {}
 
         snapshot = await asyncio.to_thread(reader.latest, underlying)
@@ -233,6 +247,17 @@ def create_app(db_path=None, results_root=None) -> FastAPI:
                         trade_state[tid] = t["exit_ts"]
                         await ws.send_json(jsonable_encoder(
                             {"type": "trade", "data": t}))
+
+                # Prints ride the existing 1 s push as one batch. A message
+                # per print would flood the browser on SPX.
+                new_prints = await asyncio.to_thread(
+                    reader.tape, underlying, limit=500, after_seq=last_seq)
+                if new_prints:
+                    last_seq = max(p["seq"] for p in new_prints)
+                    stats = await asyncio.to_thread(reader.tape_stats, underlying)
+                    await ws.send_json(jsonable_encoder(
+                        {"type": "prints",
+                         "data": {"prints": new_prints, "stats": stats}}))
 
                 await ws.send_json(jsonable_encoder(
                     {"type": "health",

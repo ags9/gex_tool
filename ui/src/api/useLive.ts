@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 
 import { api } from "./client";
-import type { Alert, Health, LatestPoll, LiveMessage, ShadowTrade } from "./types";
+import type {
+  Alert, Health, LatestPoll, LiveMessage, ShadowTrade, TapePrint, TapeStats,
+} from "./types";
 
 export type ConnState = "connecting" | "live" | "reconnecting" | "off";
 
@@ -12,12 +14,15 @@ export interface LiveState {
   health: Health | null;
   alerts: Alert[];
   pollsReceived: number;
+  prints: TapePrint[];
+  tapeStats: TapeStats | null;
   lastMessageAt: Date | null;
   error: string | null;
 }
 
 const MAX_BACKOFF_MS = 15_000;
 const ALERT_BUFFER = 50;
+const TAPE_LIMIT = 500;
 
 /**
  * One WebSocket to /ws/live, reconnecting forever.
@@ -40,6 +45,8 @@ export function useLive(underlying?: string): LiveState {
     health: null,
     alerts: [],
     pollsReceived: 0,
+    prints: [],
+    tapeStats: null,
     lastMessageAt: null,
     error: null,
   });
@@ -175,6 +182,16 @@ function apply(s: LiveState, msg: LiveMessage): LiveState {
         ...s,
         lastMessageAt: now,
         position: msg.data.exit_ts ? null : msg.data,
+      };
+    case "prints":
+      // Newest first, and bounded on the client too: a session's prints must
+      // not accumulate in the tab any more than they do on the engine.
+      return {
+        ...s,
+        lastMessageAt: now,
+        prints: [...[...msg.data.prints].sort((a, b) => b.seq - a.seq),
+                 ...s.prints].slice(0, TAPE_LIMIT),
+        tapeStats: msg.data.stats,
       };
     case "health":
       return { ...s, lastMessageAt: now, health: msg.data };

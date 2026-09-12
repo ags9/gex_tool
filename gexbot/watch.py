@@ -20,6 +20,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -32,7 +33,8 @@ from .config import settings
 from .levels import (BASE, build_profile, expiry_profile, fetch_chain,
                      fetch_index_spot)
 from .instruments import COMPLEX, INSTRUMENTS, instrument, merge_complex, root_owner
-from .livefeed import FlowLedger, OptionsFeed, combine, gamma_lookup
+from .livefeed import (FlowLedger, OptionsFeed, TapeBuffer, combine,
+                       gamma_lookup)
 from .notify import Channel, Color, DiscordNotifier
 from .state import StateStore, default_path
 
@@ -576,12 +578,37 @@ def do_shadow(n: AlertSink, prof: dict, st: WatchState, key: str,
                kind="shadow_exit", spot=spot, strike=t["strike"])
 
 
+def _append_tape_parquet(underlying: str, batch: list) -> None:
+    """--record-tape only. One file per batch under tape/date=…; unbounded by
+    design, which is why it is off by default (spec §15.2)."""
+    import datetime as _dt
+
+    import polars as pl
+
+    day = _dt.datetime.now(dt.timezone.utc).astimezone(ET).date()
+    out = (Path(settings.gex_data_root) / "tape" / f"date={day}"
+           / underlying.replace(":", "_"))
+    out.mkdir(parents=True, exist_ok=True)
+    try:
+        pl.DataFrame([{
+            "ts": p.ts, "ticker": p.ticker, "root": p.root, "expiry": p.expiry,
+            "strike": p.strike, "right": p.right, "price": p.price,
+            "size": p.size, "side": p.side, "premium": p.premium,
+            "gamma_used": p.gamma_used,
+            "dealer_gamma_delta": p.dealer_gamma_delta,
+        } for p in batch]).write_parquet(
+            out / f"{int(batch[0].ts * 1000)}.parquet", compression="zstd")
+    except Exception as e:                    # recording must never stop a poll
+        console.log(f"[yellow]tape record failed: {e}")
+
+
 # ── main loop ────────────────────────────────────────────────────────
 def run_watch(*, underlying: str = "I:SPX", interval: int = 180,
               expiries: int = 2, window: float = 0.06,
               tranche: float = 3000.0, shadow: bool = True,
               once: bool = False, state_db: Path | None = None,
-              flow: bool = True, complex_map: bool = False) -> None:
+              flow: bool = True, complex_map: bool = False,
+              record_tape: bool = False) -> None:
     """`underlying` is the instrument that ALERTS. `complex_map` additionally
     computes and stores the other instruments and the merged COMPLEX book, in
     parallel and silently (spec §10.3) — the comparison record accumulates
@@ -627,6 +654,7 @@ def run_watch(*, underlying: str = "I:SPX", interval: int = 180,
         computed += [k for k in INSTRUMENTS if k != primary]
 
     ledgers = {k: FlowLedger() for k in computed}
+    tapes = {k: TapeBuffer() for k in computed}
     gamma_books: dict[str, dict] = {k: {} for k in computed}
     spots = {k: 0.0 for k in computed}
     feed: OptionsFeed | None = None
@@ -636,6 +664,7 @@ def run_watch(*, underlying: str = "I:SPX", interval: int = 180,
         feed = OptionsFeed(
             key,
             ledger_for=lambda root: ledgers.get(root_owner(root) or ""),
+            tape_for=lambda root: tapes.get(root_owner(root) or ""),
             gamma_fn=lambda root, strike, right, expiry: gamma_books.get(
                 root_owner(root) or "", {}).get(
                     (root, float(strike), right, expiry), 0.0),
@@ -648,6 +677,28 @@ def run_watch(*, underlying: str = "I:SPX", interval: int = 180,
                       f"roots {', '.join(roots)}")
     else:
         console.print("[yellow]flow overlay OFF — map is OI-only, blind to 0DTE")
+
+    # The tape needs to reach the screen in ~2s, and the poll loop runs every
+    # few minutes, so publishing rides its own 1s thread. Writes are tiny and
+    # the store's retry handles overlap with the API's reads.
+    tape_stop = threading.Event()
+
+    def _publish_tape() -> None:
+        while not tape_stop.is_set():
+            for key_, tb in tapes.items():
+                batch = tb.drain()
+                if batch:
+                    store.write_tape(batch, key_, tb.stats())
+                    if record_tape:
+                        _append_tape_parquet(key_, batch)
+            tape_stop.wait(1.0)
+
+    if flow:
+        threading.Thread(target=_publish_tape, daemon=True).start()
+        if record_tape:
+            console.print("[yellow]--record-tape: every print is being written "
+                          "to Parquet. This is for one investigation, not a "
+                          "default — it grows without bound.")
 
     console.print(f"[bold]instruments[/bold] · alerting on {primary}"
                   + (f" · also storing {', '.join(computed[1:])} + {COMPLEX} "
@@ -664,6 +715,8 @@ def run_watch(*, underlying: str = "I:SPX", interval: int = 180,
             st = WatchState(day=day_now)
             for lg in ledgers.values():
                 lg.reset()
+            for tb in tapes.values():
+                tb.reset()
         if not once and not (SESSION_OPEN - 30 <= m <= SESSION_CLOSE + 5):
             time.sleep(60)
             continue
@@ -776,4 +829,9 @@ def run_watch(*, underlying: str = "I:SPX", interval: int = 180,
         time.sleep(interval)
     if feed is not None:
         feed.stop()
+    tape_stop.set()
+    for key_, tb in tapes.items():          # last batch before exit
+        batch = tb.drain()
+        if batch:
+            store.write_tape(batch, key_, tb.stats())
     n.flush()

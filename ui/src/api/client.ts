@@ -73,6 +73,15 @@ export const api = {
   narrate: (underlying?: string, signal?: AbortSignal) =>
     get<{ narration: string | null; model: string; as_of: string }>(
       `/api/session/narrate${q({ underlying })}`, signal),
+  tape: (
+    underlying?: string,
+    opts: { limit?: number; min_size?: number; strike?: number;
+            right?: string; side?: number } = {},
+    signal?: AbortSignal,
+  ) =>
+    get<{ prints: import("./types").TapePrint[];
+          stats: import("./types").TapeStats }>(
+      `/api/tape${q({ underlying, ...opts })}`, signal),
   underlyings: (signal?: AbortSignal) =>
     get<string[]>("/api/underlyings", signal),
   sessions: (limit = 30, signal?: AbortSignal) =>

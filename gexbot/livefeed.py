@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 
 from rich.console import Console
@@ -86,16 +86,26 @@ class FlowLedger:
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def add(self, strike: float, size: int, side: int, gamma: float,
-            spot: float) -> None:
+            spot: float) -> float:
+        """Returns the signed dealer-gamma delta actually applied.
+
+        Returned rather than recomputed by the caller so the tape's
+        `dealer_gamma_delta` column is the number the ledger really wrote. A
+        second copy of this arithmetic would be a second place for the map and
+        its own diagnostic to disagree — which is precisely what the column
+        exists to detect.
+        """
         if not side or gamma <= 0:
-            return
+            return 0.0
         # per-point dollar gamma for this print
         dollars = gamma * size * 100 * spot
+        delta = -side * dollars
         with self._lock:
-            self.gamma_by_strike[strike] += -side * dollars
+            self.gamma_by_strike[strike] += delta
             self.contracts_seen += size
             self.trades_seen += 1
             self.last_trade_ts = time.time()
+        return delta
 
     def add_premium(self, right: str, size: int, price: float, side: int) -> None:
         """Accumulate premium into four buckets, keeping bought and sold apart.
@@ -151,13 +161,102 @@ class FlowLedger:
             self.premium_trades = self.unclassified = 0
 
 
+# ── the tape (spec §15) ──────────────────────────────────────────────
+@dataclass
+class TapePrint:
+    """One classified print, unaggregated.
+
+    `gamma_used` and `dealer_gamma_delta` are diagnostics, not decoration. A
+    gamma lookup that returns 0 for every print produces a flat overlay that
+    looks exactly like a quiet market — the key-shape mismatch found while
+    wiring the flow overlay would have been obvious here and invisible
+    anywhere else.
+    """
+    ts: float
+    ticker: str
+    root: str
+    expiry: str
+    strike: float
+    right: str
+    price: float
+    size: int
+    side: int                    # +1 buy, -1 sell, 0 unclassified
+    premium: float
+    gamma_used: float
+    dealer_gamma_delta: float
+
+
+@dataclass
+class TapeBuffer:
+    """Bounded ring of recent prints, plus the session's honesty counters.
+
+    `deque(maxlen=...)` is the bound: it cannot grow past the cap no matter
+    how long the session runs or how fast SPX prints arrive.
+    """
+    cap: int = 2000
+    prints_seen: int = 0
+    contracts_seen: int = 0
+    unclassified: int = 0
+    gamma_misses: int = 0
+    _buf: deque = field(default_factory=lambda: deque(maxlen=2000), repr=False)
+    _pending: deque = field(default_factory=lambda: deque(maxlen=2000), repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.cap != 2000:
+            self._buf = deque(maxlen=self.cap)
+            self._pending = deque(maxlen=self.cap)
+
+    def add(self, p: TapePrint) -> None:
+        with self._lock:
+            self._buf.append(p)
+            self._pending.append(p)
+            self.prints_seen += 1
+            self.contracts_seen += p.size
+            if not p.side:
+                self.unclassified += 1
+            elif p.gamma_used == 0.0:
+                # classified, but the lookup had no gamma for the contract, so
+                # the print moved nothing. Counted separately from unclassified
+                # because the causes and the fixes are different.
+                self.gamma_misses += 1
+
+    def drain(self) -> list[TapePrint]:
+        """Prints since the last drain. Used to batch onto the 1 s push."""
+        with self._lock:
+            out = list(self._pending)
+            self._pending.clear()
+            return out
+
+    def recent(self, limit: int = 200) -> list[TapePrint]:
+        with self._lock:
+            return list(self._buf)[-limit:][::-1]        # newest first
+
+    def stats(self) -> dict:
+        with self._lock:
+            seen = self.prints_seen
+            return {"prints_seen": seen, "contracts_seen": self.contracts_seen,
+                    "unclassified": self.unclassified,
+                    "unclassified_pct": (self.unclassified / seen) if seen else None,
+                    "gamma_misses": self.gamma_misses,
+                    "gamma_miss_pct": (self.gamma_misses / seen) if seen else None,
+                    "buffered": len(self._buf), "cap": self.cap}
+
+    def reset(self) -> None:
+        with self._lock:
+            self._buf.clear()
+            self._pending.clear()
+            self.prints_seen = self.contracts_seen = 0
+            self.unclassified = self.gamma_misses = 0
+
+
 # ── websocket feed ───────────────────────────────────────────────────
 class OptionsFeed:
     """Background WebSocket client. Never raises into the caller; reconnects
     with exponential backoff; tracks connection health."""
 
     def __init__(self, api_key: str, ledger_for, gamma_fn, spot_fn, *,
-                 roots=SESSION_ROOTS, on_status=None):
+                 roots=SESSION_ROOTS, on_status=None, tape_for=None):
         """`ledger_for(root)` picks the book a print belongs to.
 
         One book per instrument, never one shared book: a SPY print at strike
@@ -178,6 +277,7 @@ class OptionsFeed:
             self.ledger = None
         self.gamma_fn = gamma_fn          # (root, strike, right, expiry) -> gamma
         self.spot_fn = spot_fn            # (root) -> current spot
+        self.tape_for = tape_for          # (root) -> TapeBuffer | None
         self.roots = roots
         self.on_status = on_status
         self.classifier = TickRuleClassifier()
@@ -251,11 +351,20 @@ class OptionsFeed:
         # Premium counts every print in our roots, side or no side: the
         # unclassified tally is only honest if the zero-ticks reach it.
         ledger.add_premium(right, size, float(price), side)
-        if not side:
-            return
-        gamma = self.gamma_fn(root, strike, right, expiry)
-        if gamma:
-            ledger.add(strike, size, side, gamma, self.spot_fn(root))
+
+        gamma = self.gamma_fn(root, strike, right, expiry) if side else 0.0
+        delta = (ledger.add(strike, size, side, gamma, self.spot_fn(root))
+                 if (side and gamma) else 0.0)
+
+        # The tape sees every print, including the ones that changed nothing —
+        # that is the whole diagnostic value.
+        tape = self.tape_for(root) if self.tape_for else None
+        if tape is not None:
+            tape.add(TapePrint(
+                ts=time.time(), ticker=ticker, root=root, expiry=expiry,
+                strike=strike, right=right, price=float(price), size=size,
+                side=side, premium=float(price) * size * 100.0,
+                gamma_used=float(gamma or 0.0), dealer_gamma_delta=delta))
 
 
 def _parse(ticker: str):

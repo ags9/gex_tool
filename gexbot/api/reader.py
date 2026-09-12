@@ -345,6 +345,73 @@ class StateReader:
             poll["context"] = self.context(poll, poll["strikes"], con)
         return poll
 
+    def tape(self, underlying: str | None = None, *, limit: int = 200,
+             min_size: int | None = None, strike: float | None = None,
+             right: str | None = None, side: int | None = None,
+             after_seq: int | None = None) -> list[dict]:
+        """Recent prints, newest first, filtered (spec §15.3)."""
+        if not self.exists:
+            return []
+        sql = "SELECT * FROM tape_print WHERE underlying = ?"
+        params: list = [underlying or DEFAULT_UNDERLYING]
+        if after_seq is not None:
+            sql += " AND seq > ?"
+            params.append(after_seq)
+        if min_size:
+            sql += " AND size >= ?"
+            params.append(int(min_size))
+        if strike is not None:
+            sql += " AND strike = ?"
+            params.append(float(strike))
+        if right:
+            sql += " AND opt_right = ?"
+            params.append(right.upper()[:1])
+        if side is not None:
+            sql += " AND side = ?"
+            params.append(int(side))
+        with _connect(self.path) as con:
+            rows = _dicts_optional(
+                con, sql + " ORDER BY seq DESC LIMIT ?", params + [int(limit)])
+        return rows
+
+    def tape_stats(self, underlying: str | None = None) -> dict:
+        """The honesty numbers. Returned even when empty so the panel header
+        can always render something truthful rather than nothing."""
+        empty = {"prints_seen": 0, "contracts_seen": 0, "unclassified": 0,
+                 "unclassified_pct": None, "gamma_misses": 0,
+                 "gamma_miss_pct": None, "block_threshold": None}
+        from ..ledger import BlockFlowParams
+        empty["block_threshold"] = BlockFlowParams().min_contracts
+        if not self.exists:
+            return empty
+        with _connect(self.path) as con:
+            rows = _dicts_optional(
+                con, """SELECT * FROM tape_stats WHERE underlying = ?
+                        ORDER BY session_date DESC LIMIT 1""",
+                [underlying or DEFAULT_UNDERLYING])
+        if not rows:
+            return empty
+        r = rows[0]
+        seen = r["prints_seen"] or 0
+        r["unclassified_pct"] = (r["unclassified"] / seen) if seen else None
+        r["gamma_miss_pct"] = (r["gamma_misses"] / seen) if seen else None
+        # read from the engine, never duplicated in the UI (spec §15.4)
+        r["block_threshold"] = empty["block_threshold"]
+        return r
+
+    def max_tape_seq(self, underlying: str | None = None) -> int:
+        if not self.exists:
+            return 0
+        with _connect(self.path) as con:
+            try:
+                v = con.execute(
+                    "SELECT coalesce(max(seq), 0) FROM tape_print "
+                    "WHERE underlying = ?",
+                    [underlying or DEFAULT_UNDERLYING]).fetchone()[0]
+            except duckdb.CatalogException:
+                return 0
+        return int(v or 0)
+
     def narration(self, poll_id: int) -> dict | None:
         if not self.exists:
             return None

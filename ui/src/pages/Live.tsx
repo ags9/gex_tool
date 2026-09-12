@@ -10,6 +10,7 @@ import { ExpiryPanel } from "../components/ExpiryPanel";
 import { HealthStrip } from "../components/HealthStrip";
 import { RightRail } from "../components/RightRail";
 import { StrikeProfile } from "../components/StrikeProfile";
+import { TapePanel } from "../components/TapePanel";
 
 /** Screen 1 — Live (spec §2). */
 export default function Live() {
@@ -104,8 +105,9 @@ export default function Live() {
               unitsLabel={divisor === 1 ? (instrument === "SPY" ? "SPY" : "SPX") : "SPY"}
             />
             <RightRail poll={poll} divisor={divisor} />
-            <div className="xl:col-span-2">
+            <div className="space-y-4 xl:col-span-2">
               <ExpiryPanel pollId={poll.poll_id} />
+              <TapePanel underlying={instrument} />
             </div>
           </div>
         )}

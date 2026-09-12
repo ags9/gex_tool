@@ -244,6 +244,7 @@ All commands: `python -m gexbot <cmd>`. Dates are ISO (`2024-01-02`).
 | `levels` | `--underlying` (I:SPX), `--model {naive,short_all}`, `--expiries` (2), `--window` (0.06), `--per-1pct` | Print today's GEX map from a live chain snapshot. |
 | `watch` | `--underlying {I:SPX,SPY}`, `--complex`, `--interval` (180s), `--expiries`, `--window`, `--tranche`, `--no-shadow`, `--no-flow`, `--once` | Structural alerts (09:00-16:15 ET) + shadow narration. REST chain snapshots plus the live WebSocket flow overlay. |
 | `explore` | — | Streamlit results explorer on `GEX_DASHBOARD_PORT`, bound 127.0.0.1. |
+| `watch --record-tape` | — | Writes every classified print to Parquet under `tape/date=…`. **Unbounded** — one investigation, never a default. |
 | `premarket` | `--date`, `--dry-run` | Overnight SPY range vs the last stored map, posted to `#daily`. Descriptive only. |
 | *(ui)* | `cd ui && npm run dev` | Operator dashboard on `GEX_DASHBOARD_PORT` (8741), proxying to the API. Three screens: Live, Session, Research. Not a `gexbot` subcommand. |
 | `api` | `--port` (8742) | Read-only state API + `/ws/live`. Binds 127.0.0.1 with no host flag — there is deliberately no way to expose it. |
@@ -266,6 +267,10 @@ gexbot/
                   Strike ×10, per-point gamma ÷10 — opposite directions; the
                   reverse would inflate SPY 100× and dominate the merged map.
   premarket.py    Overnight summary (§10.4). Descriptive only, by design.
+  livefeed.py     …also TapeBuffer: the bounded print ring (§15). gamma_used
+                  and dealer_gamma_delta are diagnostics — a lookup returning
+                  0 for everything makes a flat overlay that looks like a
+                  quiet market, and only the tape shows it.
   narrate.py      §13 narration + the forbidden-term lint. The lint is the
                   feature, not a filter on it — see the module docstring.
   clock.py        THE timezone authority. UTC ns <-> ET minute-of-day via
@@ -359,6 +364,17 @@ live), ports 8741/8742. **Never commit `.env`; never send creds anywhere.**
 ## 9. Known gaps
 
 **Open**
+
+- **`tape_print` is in DuckDB, which §15.2 said not to do.** A deliberate,
+  flagged deviation: the spec's stated reason is volume ("millions per
+  session… dwarf every other table"), and this table is hard-capped at
+  `TAPE_CAP` rows per instrument and trimmed inside the same transaction as
+  every insert, so it holds ~0.5 MB and cannot grow. The engine and API are
+  separate processes, so the in-memory ring is invisible to `/api/tape`; the
+  alternative — republishing it as a file at the 1 s cadence the panel needs —
+  writes gigabytes a day to the drive, which is worse on exactly the axis the
+  spec cares about. `--record-tape` remains the unbounded Parquet path and
+  stays off. Revisit if the cap ever stops being enforced at write time.
 
 - **BUG: the strike profile chart intermittently creates no renderer.** The
   container carries `_echarts_instance_` and a `zr-dom` child but **no

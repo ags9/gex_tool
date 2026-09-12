@@ -98,6 +98,10 @@ def main() -> None:
     wt.add_argument("--tranche", type=float, default=3000.0)
     wt.add_argument("--no-shadow", action="store_true",
                     help="structural alerts only, no shadow trades")
+    wt.add_argument("--record-tape", action="store_true",
+                    help="also write every classified print to Parquet under "
+                         "tape/date=…. Unbounded — for one investigation, not "
+                         "a default")
     wt.add_argument("--no-flow", action="store_true",
                     help="disable the live flow overlay; map reverts to the "
                          "OI baseline, which is blind to 0DTE")
@@ -184,7 +188,8 @@ def main() -> None:
                   expiries=args.expiries, window=args.window,
                   tranche=args.tranche, shadow=not args.no_shadow,
                       once=args.once, flow=not args.no_flow,
-                      complex_map=args.complex_map)
+                      complex_map=args.complex_map,
+                      record_tape=args.record_tape)
         except KeyboardInterrupt:
             console.print("\n[yellow]watch stopped (state saved).")
     elif args.cmd == "premarket":

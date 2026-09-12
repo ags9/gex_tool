@@ -147,7 +147,8 @@ export type LiveMessage =
   | { type: "poll"; data: LatestPoll }
   | { type: "alert"; data: Alert }
   | { type: "trade"; data: ShadowTrade }
-  | { type: "health"; data: Health };
+  | { type: "health"; data: Health }
+  | { type: "prints"; data: { prints: TapePrint[]; stats: TapeStats } };
 
 export interface Premium {
   poll_id: number;
@@ -205,4 +206,35 @@ export interface Bundle {
   summary_md: string | null;
   days: Record<string, unknown>[];
   trades: Record<string, unknown>[];
+}
+
+/** One classified print (spec §15.2). */
+export interface TapePrint {
+  seq: number;
+  underlying: string;
+  ts: string;
+  minute_of_day: number;
+  ticker: string;
+  root: string;
+  expiry: string;
+  strike: number;
+  opt_right: string;
+  price: number;
+  size: number;
+  side: number;            // +1 buy, -1 sell, 0 unclassified
+  premium: number;
+  /** Diagnostic: 0 means the gamma lookup missed and this print moved nothing. */
+  gamma_used: number;
+  /** Diagnostic: the signed contribution the ledger actually recorded. */
+  dealer_gamma_delta: number;
+}
+
+export interface TapeStats {
+  prints_seen: number;
+  contracts_seen: number;
+  unclassified: number;
+  unclassified_pct: number | null;
+  gamma_misses: number;
+  gamma_miss_pct: number | null;
+  block_threshold: number | null;
 }

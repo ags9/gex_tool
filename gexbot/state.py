@@ -138,6 +138,52 @@ CREATE TABLE IF NOT EXISTS poll_expiry (
     PRIMARY KEY (poll_id, expiry)
 );
 
+-- The live tape window (spec §15.2).
+--
+-- DEVIATION, flagged: §15.2 says prints are "not persisted to DuckDB by
+-- default", and the reason it gives is volume — millions per session, dwarfing
+-- every other table. This table cannot have that property: it is hard-capped
+-- at TAPE_CAP rows per instrument and trimmed on every write, so it holds
+-- ~0.5 MB and never grows.
+--
+-- The alternative that avoids DuckDB entirely does worse on exactly the axis
+-- the spec cares about. The engine and the API are separate processes, so the
+-- in-memory ring is invisible to `GET /api/tape`; publishing it as a file
+-- rewritten at the 1 s cadence the panel needs writes gigabytes a day to the
+-- drive. The unbounded path the spec is actually guarding against is
+-- --record-tape, which writes Parquet and stays off by default.
+CREATE TABLE IF NOT EXISTS tape_print (
+    seq                BIGINT PRIMARY KEY,
+    underlying         VARCHAR NOT NULL,
+    ts                 TIMESTAMP NOT NULL,
+    session_date       DATE NOT NULL,
+    minute_of_day      INTEGER NOT NULL,
+    ticker             VARCHAR NOT NULL,
+    root               VARCHAR NOT NULL,
+    expiry             VARCHAR NOT NULL,
+    strike             DOUBLE NOT NULL,
+    opt_right          VARCHAR NOT NULL,   -- "right" is a reserved word (RIGHT JOIN)
+    price              DOUBLE NOT NULL,
+    size               BIGINT NOT NULL,
+    side               INTEGER NOT NULL,     -- +1 buy, -1 sell, 0 unclassified
+    premium            DOUBLE NOT NULL,
+    gamma_used         DOUBLE NOT NULL,      -- diagnostic: 0 = lookup missed
+    dealer_gamma_delta DOUBLE NOT NULL       -- diagnostic: what the ledger wrote
+);
+
+-- Session counters for the tape header. Kept out of tape_print so the honesty
+-- numbers survive the ring trimming away the prints they counted.
+CREATE TABLE IF NOT EXISTS tape_stats (
+    underlying     VARCHAR NOT NULL,
+    session_date   DATE NOT NULL,
+    prints_seen    BIGINT NOT NULL,
+    contracts_seen BIGINT NOT NULL,
+    unclassified   BIGINT NOT NULL,
+    gamma_misses   BIGINT NOT NULL,
+    updated_at     TIMESTAMP NOT NULL,
+    PRIMARY KEY (underlying, session_date)
+);
+
 CREATE TABLE IF NOT EXISTS narration (
     poll_id       BIGINT PRIMARY KEY,
     ts            TIMESTAMP NOT NULL,
@@ -194,6 +240,9 @@ CREATE TABLE IF NOT EXISTS shadow_trade (
 """
 
 DEFAULT_UNDERLYING = "I:SPX"
+
+# ⚙ Ring size per instrument, matching the in-memory buffer on the feed.
+TAPE_CAP = 2000
 
 # Applied after SCHEMA on every open. DuckDB's ADD COLUMN IF NOT EXISTS is
 # idempotent and backfills existing rows with the default, so a store written
@@ -407,6 +456,55 @@ class StateStore:
         except Exception as e:
             self._note(e, "write_premium")
             return False
+
+    def write_tape(self, prints: list, underlying: str,
+                   stats: dict | None = None, *, cap: int = TAPE_CAP) -> int:
+        """Publish a batch of prints and trim the ring to `cap`.
+
+        Trimming happens in the same transaction as the insert, so the table
+        is never briefly unbounded — the cap is a property of the table, not
+        of how often something remembers to prune it.
+        """
+        if not self.available or not prints:
+            return 0
+        try:
+            rows = []
+            for p in prints:
+                ts = dt.datetime.fromtimestamp(p.ts, tz=dt.timezone.utc)
+                rows.append((self._next_id("tape", ts), underlying,
+                             ts.replace(tzinfo=None), session_date_of(ts),
+                             minute_of(ts), p.ticker, p.root, p.expiry,
+                             float(p.strike), p.right, float(p.price),
+                             int(p.size), int(p.side), float(p.premium),
+                             float(p.gamma_used), float(p.dealer_gamma_delta)))
+            with connect(self.path) as con:
+                con.executemany(
+                    """INSERT OR REPLACE INTO tape_print VALUES
+                       (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", rows)
+                # Trim by RANK, not by seq arithmetic: seq is a millisecond
+                # timestamp, not a dense counter, so `max(seq) - cap` subtracts
+                # 2000 milliseconds rather than 2000 rows and leaves whatever
+                # number of prints happened to arrive in that window.
+                con.execute(
+                    """DELETE FROM tape_print WHERE underlying = ?
+                       AND seq NOT IN (SELECT seq FROM tape_print
+                                       WHERE underlying = ?
+                                       ORDER BY seq DESC LIMIT ?)""",
+                    [underlying, underlying, cap])
+                if stats:
+                    con.execute(
+                        """INSERT OR REPLACE INTO tape_stats VALUES
+                           (?,?,?,?,?,?,?)""",
+                        [underlying, session_date_of(dt.datetime.now(dt.timezone.utc)),
+                         int(stats.get("prints_seen", 0)),
+                         int(stats.get("contracts_seen", 0)),
+                         int(stats.get("unclassified", 0)),
+                         int(stats.get("gamma_misses", 0)),
+                         _utcnow().replace(tzinfo=None)])
+            return len(rows)
+        except Exception as e:
+            self._note(e, "write_tape")
+            return 0
 
     def write_narration(self, poll_id: int, text: str, model: str,
                         ts: dt.datetime | None = None) -> bool:
