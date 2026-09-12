@@ -25,6 +25,20 @@ export interface Poll {
   feed_trades: number | null;
   feed_contracts: number | null;
   poll_ms: number | null;
+  net_dex: number | null;
+  spy_ratio: number | null;
+}
+
+export interface Expiry {
+  poll_id: number;
+  expiry: string;
+  gamma: number;
+  delta: number;
+  oi: number;
+  put_call_oi: number | null;
+  opex: "monthly" | "quarterly" | null;
+  pct_of_total: number | null;
+  pct_remaining_after: number | null;
 }
 
 export interface Strike {
@@ -32,6 +46,7 @@ export interface Strike {
   gex: number;
   oi_gex: number | null;      // null = overlay off; 0 = measured as zero
   flow_gex: number | null;
+  dex: number | null;
   /** From levels.level_label, server-side. Never derived here (spec §0). */
   label: "SUPPORT" | "RESISTANCE" | "TRAPDOOR" | "LAUNCHPAD";
   /** Unsigned day volume. Activity, not positioning. null = not recorded. */

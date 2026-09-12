@@ -116,6 +116,42 @@ def create_app(db_path=None, results_root=None) -> FastAPI:
         poll["as_of"] = poll["ts"]
         return poll
 
+    @app.get("/api/session/expiry")
+    async def session_expiry(poll_id: int = Query(...)):
+        return await asyncio.to_thread(reader.expiries, poll_id)
+
+    @app.get("/api/session/narrate")
+    async def session_narrate(underlying: str | None = Query(None),
+                              poll_id: int | None = Query(None),
+                              refresh: bool = Query(False)):
+        """Spec §13. A failure here returns narration: null and the UI shows
+        the numbers without prose — it never blocks anything."""
+        poll = await asyncio.to_thread(
+            reader.latest, underlying) if poll_id is None else \
+            await asyncio.to_thread(reader.poll_by_id, poll_id)
+        if poll is None:
+            raise HTTPException(404, "no poll to narrate")
+
+        stored = await asyncio.to_thread(reader.narration, poll["poll_id"])
+        if stored and not refresh:
+            return {"poll_id": poll["poll_id"], "as_of": poll["ts"],
+                    "narration": stored["text"], "model": stored["model"],
+                    "cached": True}
+
+        from ..narrate import narrate
+        from ..state import StateStore
+        prev = await asyncio.to_thread(reader.previous_poll, poll["poll_id"],
+                                       poll.get("underlying") or "I:SPX")
+        exps = await asyncio.to_thread(reader.expiries, poll["poll_id"])
+        result = await asyncio.to_thread(narrate, poll, poll["context"], prev, exps)
+        if result.ok and result.text:
+            await asyncio.to_thread(
+                StateStore(reader.path).write_narration,
+                poll["poll_id"], result.text, result.model)
+        return {"poll_id": poll["poll_id"], "as_of": poll["ts"],
+                "narration": result.text, "model": result.model,
+                "violations": result.violations, "cached": False}
+
     @app.get("/api/session/{date}/premium")
     async def session_premium(date: str):
         return await asyncio.to_thread(reader.premium, _date(date))
@@ -208,6 +244,11 @@ def create_app(db_path=None, results_root=None) -> FastAPI:
 def run_api(port: int | None = None, db_path=None) -> None:
     """Serve on 127.0.0.1 only. There is deliberately no host parameter."""
     import uvicorn
+    from dotenv import load_dotenv
+
+    # The other subcommands load .env in their handlers; the API needs it too
+    # now that narration reads ANTHROPIC_API_KEY.
+    load_dotenv()
 
     from rich.console import Console
     console = Console()

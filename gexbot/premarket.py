@@ -23,7 +23,7 @@ import httpx
 from rich.console import Console
 
 from .clock import ET
-from .instruments import INSTRUMENTS, SPY
+from .instruments import INSTRUMENTS, SPY, observed_ratio
 from .state import DEFAULT_UNDERLYING, default_path
 
 console = Console()
@@ -104,14 +104,16 @@ def last_profile(db_path, session_date: dt.date | None = None,
     return poll
 
 
-def summarise(poll: dict, on: Overnight) -> dict:
+def summarise(poll: dict, on: Overnight, ratio: float | None = None) -> dict:
     """Which levels the overnight range reached, and where spot sits now.
 
     The map is in SPX points and the range is in SPY, so the range is scaled
     up rather than the map scaled down — the map is what was measured, and
     converting it would quietly restate the thing being compared against.
     """
-    m = INSTRUMENTS[SPY].strike_to_spx
+    # Measured, not assumed (§10.3 amendment). Falls back to the constant only
+    # when no SPY poll exists to measure against, and says which was used.
+    m = ratio if ratio else INSTRUMENTS[SPY].strike_to_spx
     hi, lo, last, prior = on.high * m, on.low * m, on.last * m, on.prior_close * m
 
     from .levels import level_label
@@ -145,6 +147,7 @@ def summarise(poll: dict, on: Overnight) -> dict:
     # a level alert uses. Reported so the reader can discount accordingly.
     basis_pts = poll["spot"] - prior
     return {"session_date": poll["session_date"], "map_spot": poll["spot"],
+            "ratio": m, "ratio_measured": bool(ratio),
             "basis_pts": basis_pts,
             "basis_pct": basis_pts / poll["spot"] if poll["spot"] else 0.0,
             "overnight_high": hi, "overnight_low": lo, "last": last,
@@ -181,10 +184,10 @@ def render(s: dict) -> str:
         lines.append(f"· **{n['strike']:,.0f}** {n['label']} "
                      f"({n['distance']:+,.0f} pts)")
     lines += ["",
-              f"_Scaling: SPY x10. The ETF carries a basis to the index — "
-              f"{s['basis_pts']:+,.0f} SPX pts ({s['basis_pct']:+.2%}) at the "
-              f"close — so a level comparison is only good to about that "
-              f"width._",
+              f"_Scaling: SPY x{s['ratio']:.4f} "
+              f"({'measured from the same session' if s['ratio_measured'] else 'ASSUMED — no SPY poll stored'}). "
+              f"Residual basis to the map {s['basis_pts']:+,.0f} SPX pts "
+              f"({s['basis_pct']:+.2%})._",
               "_Descriptive only. Open interest is static overnight, so this "
               "map is yesterday's positioning, not today's._"]
     return "\n".join(lines)
@@ -213,7 +216,9 @@ def run_premarket(*, day: dt.date | None = None, dry_run: bool = False,
         console.print("[yellow]No extended-hours bars returned for SPY")
         return 1
 
-    body = render(summarise(poll, on))
+    spy_poll = last_profile(db, poll["session_date"], underlying=SPY)
+    ratio = observed_ratio(poll["spot"], (spy_poll or {}).get("spot"), 0.0)
+    body = render(summarise(poll, on, ratio or None))
     console.print(body)
 
     if dry_run:

@@ -55,20 +55,40 @@ def root_owner(root: str) -> str | None:
     return None
 
 
-def to_spx_scale(profile: dict, inst: Instrument) -> dict:
+def observed_ratio(spx_spot: float | None, other_spot: float | None,
+                   fallback: float) -> float:
+    """SPX points per one point of the other instrument, measured.
+
+    Amended 2026-09-11: this was a constant 10. SPY tracks the index with a
+    persistent basis — dividends, expense, tracking — measured at ~0.2%, which
+    is ~15 SPX points and wider than the proximity window a level alert uses.
+    A constant silently placed every SPY strike off its true SPX level.
+
+    Using the ratio from the SAME poll also makes a divergence observable: the
+    number is stored per poll, so a widening basis shows up in the record
+    instead of being absorbed into the map.
+    """
+    if not spx_spot or not other_spot:
+        return fallback
+    return spx_spot / other_spot
+
+
+def to_spx_scale(profile: dict, inst: Instrument,
+                 ratio: float | None = None) -> dict:
     """Re-express a profile on the SPX strike axis.
 
     Two conversions, and they go in opposite directions:
 
-      strike  x10   a SPY strike of 765 is the SPX 7,650 level
-      gamma   /10   per-point dollar gamma is dollars per ONE point of the
-                    underlying, and one SPY point is ten SPX points
+      strike  xR   a SPY strike of 765 is ~the SPX 7,665 level
+      gamma   /R   per-point dollar gamma is dollars per ONE point of the
+                   underlying, and one SPY point is ~R SPX points
 
     Getting the second one backwards would inflate SPY's contribution a
     hundredfold and quietly dominate the merged map, which is exactly the
     kind of error a "more complete" model is supposed to be suspected of.
     """
-    m, spot = inst.strike_to_spx, profile.get("spot")
+    m = inst.strike_to_spx if ratio is None else ratio
+    spot = profile.get("spot")
     if m == 1.0:
         return dict(profile)
     def conv(d: dict | None) -> dict:
@@ -101,7 +121,11 @@ def merge_complex(profiles: dict[str, dict]) -> dict | None:
     of the combined view. Inheriting SPX's walls would produce a chart that
     looks combined and is not.
     """
-    scaled = [to_spx_scale(p, INSTRUMENTS[k])
+    spx_spot = (profiles.get(SPX) or {}).get("spot")
+    ratios = {k: observed_ratio(spx_spot, p.get("spot"),
+                                INSTRUMENTS[k].strike_to_spx)
+              for k, p in profiles.items() if p and k in INSTRUMENTS}
+    scaled = [to_spx_scale(p, INSTRUMENTS[k], ratios[k])
               for k, p in profiles.items() if p and k in INSTRUMENTS]
     if not scaled:
         return None
@@ -156,4 +180,7 @@ def merge_complex(profiles: dict[str, dict]) -> dict | None:
         "first_positive_above": next((k for k in above if merged[k] > 0), None),
         "expiries": sorted({e for p in scaled for e in (p.get("expiries") or [])}),
         "components": sorted(profiles),
+        # measured, not assumed — stored so a widening basis is visible
+        "scale_ratios": {k: round(v, 6) for k, v in ratios.items()},
+        "spy_ratio": ratios.get(SPY),
     }

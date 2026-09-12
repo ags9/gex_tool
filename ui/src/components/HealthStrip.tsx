@@ -72,7 +72,15 @@ export function HealthStrip({ live, now }: Props) {
       )}
 
       <Field label="SPX" value={price(poll?.spot)} strong />
-      <Field label="net" value={money(poll?.net_gex)} strong />
+      <Field label="net γ" value={money(poll?.net_gex)} strong />
+      <Field
+        label="net Δ"
+        value={
+          poll?.net_dex === null || poll?.net_dex === undefined
+            ? "—"
+            : `${poll.net_dex >= 0 ? "+" : ""}${(poll.net_dex / 1e9).toFixed(2)}B`
+        }
+      />
 
       <span className="flex items-baseline gap-2">
         <span className="text-neutral-500">OI</span>

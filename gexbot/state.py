@@ -99,7 +99,9 @@ CREATE TABLE IF NOT EXISTS poll_snapshot (
     feed_connected   BOOLEAN,
     feed_trades      BIGINT,
     feed_contracts   BIGINT,
-    poll_ms          INTEGER
+    poll_ms          INTEGER,
+    spy_ratio        DOUBLE,          -- measured SPX/SPY basis on COMPLEX polls
+    net_dex          DOUBLE           -- net dealer delta. EXPOSURE, not a forecast.
 );
 
 CREATE TABLE IF NOT EXISTS poll_strike (
@@ -109,6 +111,7 @@ CREATE TABLE IF NOT EXISTS poll_strike (
     oi_gex           DOUBLE,
     flow_gex         DOUBLE,
     volume           DOUBLE,          -- unsigned day volume; activity, not positioning
+    dex              DOUBLE,          -- dealer delta exposure. EXPOSURE only.
     PRIMARY KEY (poll_id, strike)
 );
 
@@ -123,6 +126,26 @@ CREATE TABLE IF NOT EXISTS alert_log (
     body             VARCHAR NOT NULL,
     spot             DOUBLE,
     strike           DOUBLE
+);
+
+CREATE TABLE IF NOT EXISTS poll_expiry (
+    poll_id       BIGINT NOT NULL,
+    expiry        DATE NOT NULL,
+    gamma         DOUBLE NOT NULL,   -- dealer gamma expiring ON this date
+    delta         DOUBLE NOT NULL,   -- dealer delta expiring ON this date
+    oi            BIGINT NOT NULL,
+    put_call_oi   DOUBLE,
+    PRIMARY KEY (poll_id, expiry)
+);
+
+CREATE TABLE IF NOT EXISTS narration (
+    poll_id       BIGINT PRIMARY KEY,
+    ts            TIMESTAMP NOT NULL,
+    model         VARCHAR NOT NULL,
+    text          VARCHAR NOT NULL,
+    -- Only linted-clean text is stored. A violation is logged and dropped,
+    -- so this table never holds a sentence the lint would reject.
+    lint_ok       BOOLEAN NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS poll_premium (
@@ -194,6 +217,9 @@ MIGRATIONS = (
     f"UPDATE shadow_trade SET underlying = '{DEFAULT_UNDERLYING}' "
     f"WHERE underlying IS NULL",
     "ALTER TABLE poll_strike ADD COLUMN IF NOT EXISTS volume DOUBLE",
+    "ALTER TABLE poll_snapshot ADD COLUMN IF NOT EXISTS spy_ratio DOUBLE",
+    "ALTER TABLE poll_snapshot ADD COLUMN IF NOT EXISTS net_dex DOUBLE",
+    "ALTER TABLE poll_strike ADD COLUMN IF NOT EXISTS dex DOUBLE",
     *(f"ALTER TABLE shadow_trade ADD COLUMN IF NOT EXISTS {c} DOUBLE"
       for c in ("entry_delta", "entry_gamma", "entry_theta", "entry_vega",
                 "entry_iv")),
@@ -292,13 +318,15 @@ class StateStore:
             oi_bs = profile.get("oi_by_strike") or {}
             flow_bs = profile.get("flow_by_strike") or {}
             vol_bs = profile.get("volume_by_strike") or {}
+            dex_bs = profile.get("dex_by_strike") or {}
             exps = profile.get("expiries") or []
             fs = feed_stats or {}
             rows = [
                 (pid, float(k), float(v),
                  float(oi_bs[k]) if k in oi_bs else None,
                  float(flow_bs[k]) if k in flow_bs else None,
-                 float(vol_bs[k]) if k in vol_bs else None)
+                 float(vol_bs[k]) if k in vol_bs else None,
+                 float(dex_bs[k]) if k in dex_bs else None)
                 for k, v in by_strike.items()
             ]
             with connect(self.path) as con:
@@ -310,8 +338,9 @@ class StateStore:
                         spot, net_gex, oi_net, flow_net, flip, put_wall,
                         call_wall, max_accel, max_magnet, first_pos_above,
                         expiries, model, per_point, feed_connected,
-                        feed_trades, feed_contracts, poll_ms)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        feed_trades, feed_contracts, poll_ms, spy_ratio,
+                        net_dex)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     [pid, underlying, ts.replace(tzinfo=None), session_date_of(ts),
                      minute_of(ts), float(profile["spot"]),
                      float(profile["net"]),
@@ -322,13 +351,24 @@ class StateStore:
                      profile.get("first_positive_above"),
                      ",".join(str(e) for e in exps), model, per_point,
                      fs.get("connected"), fs.get("trades"),
-                     fs.get("contracts"), poll_ms],
+                     fs.get("contracts"), poll_ms, profile.get("spy_ratio"),
+                     profile.get("dex")],
                 )
+                exp_rows = [
+                    (pid, e["expiry"], float(e["gamma"]), float(e["delta"]),
+                     int(e["oi"]), e.get("put_call_oi"))
+                    for e in (profile.get("expiry_profile") or [])
+                ]
                 if rows:
                     con.executemany(
                         """INSERT INTO poll_strike
-                           (poll_id, strike, gex, oi_gex, flow_gex, volume)
-                           VALUES (?,?,?,?,?,?)""", rows)
+                           (poll_id, strike, gex, oi_gex, flow_gex, volume, dex)
+                           VALUES (?,?,?,?,?,?,?)""", rows)
+                if exp_rows:
+                    con.executemany(
+                        """INSERT OR REPLACE INTO poll_expiry
+                           (poll_id, expiry, gamma, delta, oi, put_call_oi)
+                           VALUES (?,?,?,?,?,?)""", exp_rows)
             return pid
         except Exception as e:
             self._note(e, "write_poll")
@@ -366,6 +406,28 @@ class StateStore:
             return True
         except Exception as e:
             self._note(e, "write_premium")
+            return False
+
+    def write_narration(self, poll_id: int, text: str, model: str,
+                        ts: dt.datetime | None = None) -> bool:
+        """Store a narration against the poll it describes (spec §13.3).
+
+        The poll_id and model version travel with the text so the prose can
+        be audited against the numbers that produced it — which is the only
+        way to catch a prompt that has drifted into implying things.
+        """
+        if not self.available or poll_id is None:
+            return False
+        try:
+            with connect(self.path) as con:
+                con.execute(
+                    """INSERT OR REPLACE INTO narration
+                       (poll_id, ts, model, text, lint_ok) VALUES (?,?,?,?,?)""",
+                    [poll_id, (ts or _utcnow()).replace(tzinfo=None), model,
+                     text, True])
+            return True
+        except Exception as e:
+            self._note(e, "write_narration")
             return False
 
     def write_alert(self, *, channel: str, kind: str, title: str, body: str,

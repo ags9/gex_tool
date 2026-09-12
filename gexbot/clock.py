@@ -55,3 +55,17 @@ def et_minute_to_utc_ns(day: dt.date, minute: int) -> int:
     """
     local = dt.datetime.combine(day, dt.time(minute // 60, minute % 60), tzinfo=ET)
     return int(local.astimezone(dt.timezone.utc).timestamp() * 1e9)
+
+
+def opex_kind(day: dt.date) -> str | None:
+    """"quarterly" / "monthly" for a third-Friday expiration, else None.
+
+    A calendar rule, not an inference from open interest (spec §11.2). OPEX
+    size is the thing one would want to explain WITH this label; deriving the
+    label from that size would make the explanation circular.
+    """
+    if day.weekday() != 4:                       # Friday
+        return None
+    if not 15 <= day.day <= 21:                  # the third one
+        return None
+    return "quarterly" if day.month in (3, 6, 9, 12) else "monthly"

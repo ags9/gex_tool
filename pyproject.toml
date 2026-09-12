@@ -11,6 +11,7 @@ dependencies = [
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "httpx>=0.27",
+    "anthropic>=1.0",        # section 13 narration
     "fastapi>=0.115",        # read-only state API (localhost only)
     "uvicorn>=0.30",
     "websockets>=12.0",

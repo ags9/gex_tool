@@ -4,7 +4,7 @@ import { useMemo, useState } from "react";
 import type { Level, Strike } from "../api/types";
 import { money, price } from "./format";
 
-export type Source = "flow" | "oi" | "volume";
+export type Source = "flow" | "oi" | "volume" | "dex";
 
 interface Props {
   strikes: Strike[];
@@ -46,9 +46,16 @@ export function StrikeProfile({ strikes, levels, spot, overlayOn, divisor,
                                 unitsLabel }: Props) {
   const [source, setSource] = useState<Source>("flow");
   const hasVolume = strikes.some((s) => s.volume !== null && s.volume !== undefined);
+  const hasDex = strikes.some((s) => s.dex !== null && s.dex !== undefined);
+  // A flow component that is identically zero is not worth stacking — and
+  // ECharts draws nothing at all for a stack whose second series is uniformly
+  // zero, which is how this surfaced. Render the single series instead and
+  // say so, rather than showing an empty chart that claims a split.
+  const hasFlow = strikes.some((s) => (s.flow_gex ?? 0) !== 0);
   const effective: Source =
     source === "flow" && !overlayOn ? "oi"
     : source === "volume" && !hasVolume ? "oi"
+    : source === "dex" && !hasDex ? "oi"
     : source;
 
   const rows = useMemo(
@@ -146,6 +153,48 @@ export function StrikeProfile({ strikes, levels, spot, overlayOn, divisor,
       })),
     ];
 
+    if (effective === "dex") {
+      // EXPOSURE. Deliberately not called a "bid" or a "cushion": those are
+      // claims about what dealers do with the exposure, and none is tested.
+      return {
+        backgroundColor: "transparent",
+        grid: { left: 62, right: 34, top: 16, bottom: 28 },
+        tooltip: { trigger: "axis" as const, backgroundColor: "#111",
+                   borderColor: "#333", textStyle: { color: "#e5e5e5", fontSize: 11 },
+                   formatter: (params: any) => {
+                     const r = rows[params?.[0]?.dataIndex ?? 0];
+                     return r ? `<b>${fmt(r.strike)}</b><div style="color:#888">`
+                       + `net delta <span style="color:#e5e5e5">`
+                       + `${((r.dex ?? 0) / 1e9).toFixed(2)}B</span></div>` : "";
+                   } },
+        xAxis: { type: "value" as const,
+                 axisLabel: { color: "#666", fontSize: 10,
+                              formatter: (v: number) => `${(v / 1e9).toFixed(1)}B` },
+                 splitLine: { lineStyle: { color: "#1f1f1f" } } },
+        yAxis: { type: "category" as const, inverse: true,
+                 data: categories.map(fmt),
+                 axisLabel: { color: "#777", fontSize: 10 },
+                 axisTick: { show: false }, splitLine: { show: false } },
+        dataZoom: [
+          { type: "slider" as const, yAxisIndex: 0, filterMode: "none" as const,
+            startValue: Math.max(0, Math.round(spotIdx - span)),
+            endValue: Math.min(categories.length - 1, Math.round(spotIdx + span)),
+            width: 10, right: 4, fillerColor: "#ffffff12", borderColor: "#2a2a2a",
+            handleStyle: { color: "#555" }, textStyle: { color: "#666", fontSize: 9 } },
+          { type: "inside" as const, yAxisIndex: 0, filterMode: "none" as const },
+        ],
+        series: [{
+          name: "net delta", type: "bar" as const,
+          data: rows.map((r) => ({
+            value: r.dex ?? 0,
+            itemStyle: { color: (r.dex ?? 0) >= 0 ? "#3f8f6f" : "#8f5f3f" },
+          })),
+          barCategoryGap: "28%",
+          markLine: { silent: true, symbol: "none", data: markLines },
+        }],
+      };
+    }
+
     if (effective === "volume") {
       // Activity, not positioning: unsigned counts, deliberately a different
       // colour family from the signed gamma bars so the two are never read
@@ -169,12 +218,12 @@ export function StrikeProfile({ strikes, levels, spot, overlayOn, divisor,
                  axisLabel: { color: "#777", fontSize: 10 },
                  axisTick: { show: false }, splitLine: { show: false } },
         dataZoom: [
-          { type: "slider" as const, yAxisIndex: 0,
+          { type: "slider" as const, yAxisIndex: 0, filterMode: "none" as const,
             startValue: Math.max(0, Math.round(spotIdx - span)),
             endValue: Math.min(categories.length - 1, Math.round(spotIdx + span)),
             width: 10, right: 4, fillerColor: "#ffffff12", borderColor: "#2a2a2a",
             handleStyle: { color: "#555" }, textStyle: { color: "#666", fontSize: 9 } },
-          { type: "inside" as const, yAxisIndex: 0 },
+          { type: "inside" as const, yAxisIndex: 0, filterMode: "none" as const },
         ],
         series: [{
           name: "day volume", type: "bar" as const,
@@ -232,6 +281,7 @@ export function StrikeProfile({ strikes, levels, spot, overlayOn, divisor,
         {
           type: "slider" as const,
           yAxisIndex: 0,
+          filterMode: "none" as const,
           startValue: Math.max(0, Math.round(spotIdx - span)),
           endValue: Math.min(categories.length - 1, Math.round(spotIdx + span)),
           width: 10,
@@ -241,10 +291,10 @@ export function StrikeProfile({ strikes, levels, spot, overlayOn, divisor,
           handleStyle: { color: "#555" },
           textStyle: { color: "#666", fontSize: 9 },
         },
-        { type: "inside" as const, yAxisIndex: 0 },
+        { type: "inside" as const, yAxisIndex: 0, filterMode: "none" as const },
       ],
       series:
-        effective === "flow"
+        effective === "flow" && hasFlow
           ? [
               {
                 name: "OI",
@@ -302,6 +352,10 @@ export function StrikeProfile({ strikes, levels, spot, overlayOn, divisor,
           <Toggle active={effective === "oi"} onClick={() => setSource("oi")}>
             OI
           </Toggle>
+          <Toggle active={effective === "dex"} disabled={!hasDex}
+                  onClick={() => setSource("dex")}>
+            DEX
+          </Toggle>
           <Toggle
             active={effective === "volume"}
             disabled={!hasVolume}
@@ -321,11 +375,25 @@ export function StrikeProfile({ strikes, levels, spot, overlayOn, divisor,
       />
 
       <p className="border-t border-neutral-800 px-4 py-2 text-xs text-neutral-600">
-        {effective === "volume" ? (
+        {effective === "dex" ? (
+          <>
+            Net dealer delta per strike —{" "}
+            <span className="text-neutral-500">exposure, nothing more</span>. It
+            is not a &ldquo;mechanical bid&rdquo; or a &ldquo;cushion&rdquo;;
+            those describe what dealers would do with it, which is untested here.
+          </>
+        ) : effective === "volume" ? (
           <>
             Unsigned contracts traded today per strike —{" "}
             <span className="text-neutral-500">activity, not positioning</span>.
             It says nothing about who initiated or which way dealers are hedged.
+          </>
+        ) : overlayOn && !hasFlow ? (
+          <>
+            Flow overlay is on but today&rsquo;s classified flow is{" "}
+            <span className="text-neutral-500">zero at every strike</span> — the
+            market is closed or no prints have been classified yet, so the bars
+            are the OI baseline alone. Measured as zero, not missing.
           </>
         ) : overlayOn ? (
           <>

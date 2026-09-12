@@ -148,7 +148,7 @@ class StateReader:
                 return None
             poll = polls[0]
             poll["strikes"] = _dicts(
-                con, """SELECT strike, gex, oi_gex, flow_gex, volume FROM poll_strike
+                con, """SELECT strike, gex, oi_gex, flow_gex, volume, dex FROM poll_strike
                         WHERE poll_id=? ORDER BY strike""", [poll["poll_id"]])
             self._label_strikes(poll["strikes"], poll["spot"])
             poll["position"] = self._open_position(con)
@@ -301,12 +301,67 @@ class StateReader:
                 return None
             poll = rows[0]
             poll["strikes"] = _dicts(
-                con, """SELECT strike, gex, oi_gex, flow_gex, volume FROM poll_strike
+                con, """SELECT strike, gex, oi_gex, flow_gex, volume, dex FROM poll_strike
                         WHERE poll_id=? ORDER BY strike""", [poll["poll_id"]])
             poll["requested_minute"] = minute
             self._label_strikes(poll["strikes"], poll["spot"])
             poll["context"] = self.context(poll, poll["strikes"], con)
         return poll
+
+    def expiries(self, poll_id: int) -> list[dict]:
+        """Per-expiry rows. `remaining` and `pct` are derived HERE, on read —
+        storing cumulative values beside their components creates two numbers
+        that can disagree (spec §11.1)."""
+        if not self.exists:
+            return []
+        with _connect(self.path) as con:
+            rows = _dicts_optional(
+                con, "SELECT * FROM poll_expiry WHERE poll_id=? ORDER BY expiry",
+                [poll_id])
+        from ..clock import opex_kind
+        total = sum(r["gamma"] for r in rows)
+        running = total
+        for r in rows:
+            r["opex"] = opex_kind(r["expiry"])
+            running -= r["gamma"]
+            r["remaining_after"] = running
+            r["pct_of_total"] = (r["gamma"] / total) if total else None
+            r["pct_remaining_after"] = (running / total) if total else None
+        return rows
+
+    def poll_by_id(self, poll_id: int) -> dict | None:
+        if not self.exists:
+            return None
+        with _connect(self.path) as con:
+            rows = _dicts(con, "SELECT * FROM poll_snapshot WHERE poll_id=?",
+                          [poll_id])
+            if not rows:
+                return None
+            poll = rows[0]
+            poll["strikes"] = _dicts(
+                con, """SELECT strike, gex, oi_gex, flow_gex, volume, dex FROM poll_strike
+                        WHERE poll_id=? ORDER BY strike""", [poll_id])
+            self._label_strikes(poll["strikes"], poll["spot"])
+            poll["context"] = self.context(poll, poll["strikes"], con)
+        return poll
+
+    def narration(self, poll_id: int) -> dict | None:
+        if not self.exists:
+            return None
+        with _connect(self.path) as con:
+            rows = _dicts_optional(
+                con, "SELECT * FROM narration WHERE poll_id=?", [poll_id])
+        return rows[0] if rows else None
+
+    def previous_poll(self, poll_id: int, underlying: str) -> dict | None:
+        if not self.exists:
+            return None
+        with _connect(self.path) as con:
+            rows = _dicts(con, """SELECT * FROM poll_snapshot
+                                  WHERE poll_id < ? AND underlying = ?
+                                  ORDER BY poll_id DESC LIMIT 1""",
+                          [poll_id, underlying])
+        return rows[0] if rows else None
 
     def premium(self, session_date: dt.date) -> list[dict]:
         """Cumulative premium by side through the session (spec §3.3)."""
@@ -414,7 +469,7 @@ class StateReader:
                                 "ORDER BY poll_id", [poll_id])
             for p in polls:
                 p["strikes"] = _dicts(
-                    con, """SELECT strike, gex, oi_gex, flow_gex, volume FROM poll_strike
+                    con, """SELECT strike, gex, oi_gex, flow_gex, volume, dex FROM poll_strike
                             WHERE poll_id=? ORDER BY strike""", [p["poll_id"]])
         return polls
 
@@ -460,7 +515,7 @@ class StateReader:
                            [last_poll] + ([] if u is None else [u]))
             for p in polls:
                 p["strikes"] = _dicts(
-                    con, """SELECT strike, gex, oi_gex, flow_gex, volume FROM poll_strike
+                    con, """SELECT strike, gex, oi_gex, flow_gex, volume, dex FROM poll_strike
                             WHERE poll_id=? ORDER BY strike""", [p["poll_id"]])
                 # A pushed poll is self-describing: carrying the previous
                 # poll's levels and regime alongside a new spot would put two

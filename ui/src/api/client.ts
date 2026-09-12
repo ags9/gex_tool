@@ -68,6 +68,11 @@ export const api = {
     get<Premium[]>(`/api/session/${date}/premium`, signal),
   heatmap: (date: string, underlying?: string, signal?: AbortSignal) =>
     get<Heatmap>(`/api/session/${date}/heatmap${q({ underlying })}`, signal),
+  expiries: (pollId: number, signal?: AbortSignal) =>
+    get<import("./types").Expiry[]>(`/api/session/expiry?poll_id=${pollId}`, signal),
+  narrate: (underlying?: string, signal?: AbortSignal) =>
+    get<{ narration: string | null; model: string; as_of: string }>(
+      `/api/session/narrate${q({ underlying })}`, signal),
   underlyings: (signal?: AbortSignal) =>
     get<string[]>("/api/underlyings", signal),
   sessions: (limit = 30, signal?: AbortSignal) =>

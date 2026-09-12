@@ -55,7 +55,7 @@ forms."*
 ### What is nonetheless solid
 
 A pipeline that survives 7-billion-row days; ledgers, greeks, entry/exit/
-discipline engines (137 tests passing *(verify)*); honest REST NBBO marks
+discipline engines (139 tests passing *(verify)*); honest REST NBBO marks
 with provenance tracking; a backtest runner with era splits and executable
 gates; a four-arm control harness; put-call-parity spot reconstruction for
 pre-2023; Discord alerting; a results explorer. None of this is invalidated
@@ -266,6 +266,8 @@ gexbot/
                   Strike ×10, per-point gamma ÷10 — opposite directions; the
                   reverse would inflate SPY 100× and dominate the merged map.
   premarket.py    Overnight summary (§10.4). Descriptive only, by design.
+  narrate.py      §13 narration + the forbidden-term lint. The lint is the
+                  feature, not a filter on it — see the module docstring.
   clock.py        THE timezone authority. UTC ns <-> ET minute-of-day via
                   zoneinfo, scalar + vectorized + inverse. Never reintroduce a
                   hardcoded UTC offset; import from here. watch.minute_now()
@@ -341,7 +343,7 @@ flat 15:50, max 3 trades/day (5 on range days), 2 losing trades ends the day,
 ```bash
 uv venv && source .venv/bin/activate && uv pip install -e ".[dev]"
 cp .env.example .env          # fill Massive keys + GEX_DATA_ROOT
-python -m pytest -q           # 137 passing
+python -m pytest -q           # 139 passing
 ruff check .                  # line-length 100
 ```
 
@@ -357,6 +359,22 @@ live), ports 8741/8742. **Never commit `.env`; never send creds anywhere.**
 ## 9. Known gaps
 
 **Open**
+
+- **BUG: the strike profile draws no bars in `flow` source mode.** OI, DEX and
+  volume modes render correctly on the same data and the same chart. Measured,
+  not inferred: the ECharts option contains 155 valid bar values (max +8.87M),
+  a category y-axis of matching length, and a sane grid; markLines render; an
+  exhaustive canvas pixel count finds no bar-coloured pixels. Ruled out — the
+  stack (reducing flow mode to a single series changes nothing), `filterMode`
+  (set to `none`, no change), the §10.1 units divisor (present at divisor 1),
+  and any code difference from the last known-good render (the flow branch is
+  byte-identical to it; the regression appeared when the chain widened from
+  ~80 to 155 strikes with mixed 5/10/25-point spacing). Next step is a minimal
+  ECharts repro outside the app. Workaround: the `OI` toggle.
+- **§13 narration rejects roughly half its output.** The lint is working as
+  designed — dropped, never shown — but the model reaches for "will" often
+  enough that the prose is intermittent. Tighten the prompt before relying on
+  the daily post.
 
 - **SPY×10 is not SPX.** The ETF carries a persistent basis to the index
   (dividends, expense, tracking) — measured at ~0.2%, or ~15 SPX points,
@@ -468,6 +486,42 @@ live), ports 8741/8742. **Never commit `.env`; never send creds anywhere.**
   only, so nothing imported them.
 
 ## 10. Working agreements for sessions in this repo
+
+- **Verify that a change actually changed something.** The characteristic
+  failure in this codebase is not an exception — it is plausible-looking
+  output. Four instances so far, all of which looked correct and all of which
+  were found by checking rather than by anything breaking:
+
+  | | What it looked like | What it was |
+  |---|---|---|
+  | tz fixture | replay tests green | fixture stamped `-5` and replay read `-5`; two compensating bugs |
+  | lock test | "reader works while writing" | the write silently failed and nothing asserted the result |
+  | premium fixture | flow reconciled | buy and sell were equal, so the net cancelled to exactly 0 |
+  | units toggle | labels correct | the bars had stopped drawing entirely |
+  | narration | fluent, numbers right | inverted the core mechanic — said negative gamma *dampens* moves |
+
+  So, before reporting a change as working:
+
+  1. **Make the new assertion fail on purpose.** If a test passes both with
+     and without the fix, it is testing nothing. Revert the change, watch it
+     go red, restore it.
+  2. **Assert a value only the new path can produce.** `is not None` and
+     "no exception" pass for code that did nothing.
+  3. **Never let a fixture be symmetric.** Equal-and-opposite inputs cancel,
+     and a broken sum reads as a correct zero. Use unequal values.
+  4. **Check a fixture is not compensating for the bug.** If test data is
+     built with the same wrong assumption the code makes, both agree and the
+     result is wrong.
+  5. **For anything rendered, compare before and after.** A screenshot that
+     "looks right" is not evidence the specific thing you changed moved;
+     name the pixel, number, or row expected to differ, and confirm it did.
+  6. **When a `replace` or migration reports success, confirm the target
+     changed.** A non-matching pattern is a silent no-op; three instances so
+     far were exactly this (one left an axis unconverted, one dropped a `dex`
+     column from a SELECT, one produced a schema with a missing comma).
+  7. **A lint or schema check governs form, not truth.** The narration lint
+     passes text that inverts the gamma mechanic. Anything the model could
+     state backwards is supplied to it as a fact, never inferred.
 
 - **State the §3 rule before any work that touches strategy parameters.**
 - Log every backtest/control/sweep run to `docs/RUNLOG.md`, labelled

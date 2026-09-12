@@ -72,6 +72,7 @@ def build_profile(contracts: list[dict], spot: float, *,
     keep_exp = set(exps[:expiries])
 
     by_strike: dict[float, float] = defaultdict(float)
+    dex_by_strike: dict[float, float] = defaultdict(float)
     oi_by_strike: dict[float, float] = defaultdict(float)
     vol_by_strike: dict[float, float] = defaultdict(float)
     total_oi = 0
@@ -84,6 +85,7 @@ def build_profile(contracts: list[dict], spot: float, *,
         exp = d.get("expiration_date")
         oi = c.get("open_interest") or 0
         gamma = g.get("gamma")
+        delta = g.get("delta")
         if not strike or not right or gamma is None or not oi:
             continue
         if exp not in keep_exp or not (lo <= strike <= hi):
@@ -100,6 +102,16 @@ def build_profile(contracts: list[dict], spot: float, *,
         else:                                  # short_all
             signed = -gex
         by_strike[float(strike)] += signed
+
+        # §12 net delta, same dealer-model convention as gamma. Exposure, and
+        # only exposure: the interpretations this number usually attracts
+        # ("mechanical bid", "cushion") are claims about what dealers will do
+        # with it, and this project has tested none of them.
+        if delta is not None:
+            dex = delta * oi * 100 * spot
+            if not per_point:
+                dex *= spot * 0.01
+            dex_by_strike[float(strike)] += dex if model == "naive" else -dex
         oi_by_strike[float(strike)] += oi
         # Day volume is ACTIVITY, not positioning: unsigned contracts traded,
         # with no view on who initiated. Kept separate from gamma for that
@@ -134,6 +146,8 @@ def build_profile(contracts: list[dict], spot: float, *,
         "net": net,
         "flip": flip,
         "by_strike": by_strike,
+        "dex_by_strike": dict(dex_by_strike),
+        "dex": sum(dex_by_strike.values()),
         "volume_by_strike": dict(vol_by_strike),
         "total_oi": total_oi,
         "expiries": sorted(keep_exp),
@@ -145,6 +159,60 @@ def build_profile(contracts: list[dict], spot: float, *,
                       if above else None),
         "first_positive_above": next((k for k in above if by_strike[k] > 0), None),
     }
+
+
+def expiry_profile(contracts: list[dict], spot: float, *, model: str = "naive",
+                   strike_window: float = 0.06, days: int = 30) -> list[dict]:
+    """Dealer gamma and delta grouped by expiration date (spec §11.1).
+
+    Deliberately a separate pass from `build_profile`, which keeps only the
+    nearest N expiries: the question here is precisely what lies BEYOND that
+    window, so reusing its filter would answer a different question.
+
+    Only per-expiry facts are returned. `remaining` and `pct` are derived on
+    read — storing cumulative values alongside their components creates two
+    numbers that can disagree, and the derived one is the cheap one.
+    """
+    lo, hi = spot * (1 - strike_window), spot * (1 + strike_window)
+    today = dt.date.today()
+    horizon = today + dt.timedelta(days=days)
+
+    acc: dict[str, dict] = {}
+    for c in contracts:
+        d = c.get("details") or {}
+        g = c.get("greeks") or {}
+        strike, right, exp = (d.get("strike_price"), d.get("contract_type"),
+                              d.get("expiration_date"))
+        oi = c.get("open_interest") or 0
+        gamma = g.get("gamma")
+        if not strike or not right or not exp or gamma is None or not oi:
+            continue
+        if not (lo <= strike <= hi):
+            continue
+        try:
+            ed = dt.date.fromisoformat(exp)
+        except ValueError:
+            continue
+        if ed < today or ed > horizon:
+            continue
+
+        e = acc.setdefault(exp, {"expiry": exp, "gamma": 0.0, "delta": 0.0,
+                                 "oi": 0, "call_oi": 0, "put_oi": 0})
+        gex = gamma * oi * 100 * spot
+        signed = (gex if right == "call" else -gex) if model == "naive" else -gex
+        e["gamma"] += signed
+        delta = g.get("delta")
+        if delta is not None:
+            dex = delta * oi * 100 * spot
+            e["delta"] += dex if model == "naive" else -dex
+        e["oi"] += int(oi)
+        e["call_oi" if right == "call" else "put_oi"] += int(oi)
+
+    out = []
+    for e in sorted(acc.values(), key=lambda x: x["expiry"]):
+        e["put_call_oi"] = (e["put_oi"] / e["call_oi"]) if e["call_oi"] else None
+        out.append(e)
+    return out
 
 
 def level_label(gamma_at_strike: float, below_spot: bool) -> str:

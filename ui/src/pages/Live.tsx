@@ -6,6 +6,7 @@ import {
   useUnits,
 } from "../api/prefs";
 import { useLive, useNow } from "../api/useLive";
+import { ExpiryPanel } from "../components/ExpiryPanel";
 import { HealthStrip } from "../components/HealthStrip";
 import { RightRail } from "../components/RightRail";
 import { StrikeProfile } from "../components/StrikeProfile";
@@ -103,6 +104,9 @@ export default function Live() {
               unitsLabel={divisor === 1 ? (instrument === "SPY" ? "SPY" : "SPX") : "SPY"}
             />
             <RightRail poll={poll} divisor={divisor} />
+            <div className="xl:col-span-2">
+              <ExpiryPanel pollId={poll.poll_id} />
+            </div>
           </div>
         )}
       </main>

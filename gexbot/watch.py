@@ -29,7 +29,8 @@ from rich.console import Console
 
 from .clock import ET
 from .config import settings
-from .levels import BASE, build_profile, fetch_chain, fetch_index_spot
+from .levels import (BASE, build_profile, expiry_profile, fetch_chain,
+                     fetch_index_spot)
 from .instruments import COMPLEX, INSTRUMENTS, instrument, merge_complex, root_owner
 from .livefeed import FlowLedger, OptionsFeed, combine, gamma_lookup
 from .notify import Channel, Color, DiscordNotifier
@@ -694,8 +695,13 @@ def run_watch(*, underlying: str = "I:SPX", interval: int = 180,
                                      strike_window=window)
                 if not oi_p:
                     continue
-                profiles[key_] = (combine(oi_p, ledgers[key_].snapshot())
-                                  if feed is not None else oi_p)
+                prof_ = (combine(oi_p, ledgers[key_].snapshot())
+                         if feed is not None else oi_p)
+                # §11: the shelf life of this map. Computed from the full
+                # chain, not the two expiries build_profile keeps.
+                prof_["expiry_profile"] = expiry_profile(
+                    contracts, sp, model="naive", strike_window=window)
+                profiles[key_] = prof_
 
             if complex_map and len(profiles) > 1:
                 merged = merge_complex(profiles)
