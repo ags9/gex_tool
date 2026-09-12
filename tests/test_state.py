@@ -311,7 +311,9 @@ def test_watch_once_writes_exactly_one_poll(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(w, "minute_now", lambda: 11 * 60)
 
     db = tmp_path / "state.duckdb"
-    w.run_watch(once=True, shadow=True, state_db=db)
+    # flow=False: the overlay opens a real WebSocket, which a test must not.
+    # The flow path has its own end-to-end coverage in test_flow_overlay.py.
+    w.run_watch(once=True, shadow=True, state_db=db, flow=False)
 
     s = StateStore(db)
     polls = _rows(s, "SELECT poll_id, spot, net_gex, poll_ms FROM poll_snapshot")

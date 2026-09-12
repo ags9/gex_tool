@@ -243,7 +243,7 @@ def test_no_structural_alerts_after_hours_but_the_poll_is_still_recorded(
     monkeypatch.setattr(w, "minute_now", lambda: 20 * 60 + 17)
 
     db = tmp_path / "state.duckdb"
-    w.run_watch(once=True, shadow=True, state_db=db)
+    w.run_watch(once=True, shadow=True, state_db=db, flow=False)
 
     with duckdb.connect(str(db), read_only=True) as con:
         assert con.execute("SELECT count(*) FROM poll_snapshot").fetchone()[0] == 1

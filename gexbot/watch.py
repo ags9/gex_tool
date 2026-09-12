@@ -30,6 +30,7 @@ from rich.console import Console
 from .clock import ET
 from .config import settings
 from .levels import BASE, build_profile, fetch_chain, fetch_index_spot
+from .livefeed import FlowLedger, OptionsFeed, combine, gamma_lookup
 from .notify import Channel, Color, DiscordNotifier
 from .state import StateStore, default_path
 
@@ -546,7 +547,8 @@ def do_shadow(n: AlertSink, prof: dict, st: WatchState, key: str,
 def run_watch(*, underlying: str = "I:SPX", interval: int = 180,
               expiries: int = 2, window: float = 0.06,
               tranche: float = 3000.0, shadow: bool = True,
-              once: bool = False, state_db: Path | None = None) -> None:
+              once: bool = False, state_db: Path | None = None,
+              flow: bool = True) -> None:
     key = os.getenv("MASSIVE_API_KEY", "")
     if not key or key == "your_key_here":
         console.print("[red]MASSIVE_API_KEY not set")
@@ -573,6 +575,31 @@ def run_watch(*, underlying: str = "I:SPX", interval: int = 180,
                   + ("" if store.available else " [red](unavailable — "
                      "polls will not be recorded; alerting is unaffected)"))
 
+    # ── live flow overlay ────────────────────────────────────────────
+    # Open interest publishes once pre-market and reflects yesterday's close,
+    # so an OI-only map is structurally blind to 0DTE — roughly half of SPX
+    # volume. The feed classifies today's prints and layers them on top.
+    # It runs in its own thread and never raises into this loop; if it cannot
+    # connect, the map degrades to the OI baseline rather than stopping.
+    ledger = FlowLedger()
+    feed: OptionsFeed | None = None
+    gamma_book: dict[tuple, float] = {}
+    spot_box = {"spot": 0.0}
+
+    if flow:
+        feed = OptionsFeed(
+            key, ledger,
+            gamma_fn=lambda strike, right, expiry: gamma_book.get(
+                (float(strike), right, expiry), 0.0),
+            spot_fn=lambda: spot_box["spot"],
+            on_status=lambda state, detail: console.log(
+                f"[dim]feed {state}: {detail}"))
+        feed.start()
+        console.print("[bold]flow overlay[/bold] · live WebSocket "
+                      "(OI baseline + today's classified prints)")
+    else:
+        console.print("[yellow]flow overlay OFF — map is OI-only, blind to 0DTE")
+
     while True:
         m = minute_now()
         if not once and not (SESSION_OPEN - 30 <= m <= SESSION_CLOSE + 5):
@@ -586,16 +613,35 @@ def run_watch(*, underlying: str = "I:SPX", interval: int = 180,
                                          strike_window=window,
                                          expiry_before=exp_cap)
             spot = csp or spot
-            prof = build_profile(contracts, spot, model="naive",
-                                 per_point=True, expiries=expiries,
-                                 strike_window=window)
+            spot_box["spot"] = spot
+            # refresh the gamma book each poll so the feed can price prints
+            # on strikes that have only just come into the window
+            if feed is not None:
+                gamma_book = gamma_lookup(contracts)
+            oi_prof = build_profile(contracts, spot, model="naive",
+                                    per_point=True, expiries=expiries,
+                                    strike_window=window)
+            # overlay today's classified flow on the OI baseline
+            prof = (combine(oi_prof, ledger.snapshot())
+                    if (feed is not None and oi_prof) else oi_prof)
             if prof:
+                flow_note = ""
+                if feed is not None:
+                    flow_note = (f" · flow {fmt_m(prof.get('flow_net') or 0.0)}"
+                                 f" from {ledger.trades_seen:,} prints"
+                                 f"{'' if feed.connected else ' [feed down]'}")
                 console.log(f"spot {prof['spot']:,.0f} net {fmt_m(prof['net'])} "
-                            f"flip {prof.get('flip') or float('nan'):,.0f}")
+                            f"flip {prof.get('flip') or float('nan'):,.0f}"
+                            + flow_note)
                 # record the poll BEFORE any alert fires, so every alert this
                 # poll produces can point at the map that produced it
                 n.poll_id = store.write_poll(
-                    prof, poll_ms=int((time.monotonic() - t0) * 1000),
+                    prof,
+                    feed_stats=({"connected": feed.connected,
+                                 "trades": ledger.trades_seen,
+                                 "contracts": ledger.contracts_seen}
+                                if feed is not None else None),
+                    poll_ms=int((time.monotonic() - t0) * 1000),
                     model="naive", per_point=True)
                 # Structural narration is silent outside 09:00-16:15 ET. The
                 # poll itself is still recorded — the history should not have
@@ -625,4 +671,6 @@ def run_watch(*, underlying: str = "I:SPX", interval: int = 180,
             st.closed_trades = []
             st.save(state_path)
         time.sleep(interval)
+    if feed is not None:
+        feed.stop()
     n.flush()

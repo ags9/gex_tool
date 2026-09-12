@@ -89,6 +89,9 @@ def main() -> None:
     wt.add_argument("--tranche", type=float, default=3000.0)
     wt.add_argument("--no-shadow", action="store_true",
                     help="structural alerts only, no shadow trades")
+    wt.add_argument("--no-flow", action="store_true",
+                    help="disable the live flow overlay; map reverts to the "
+                         "OI baseline, which is blind to 0DTE")
     wt.add_argument("--once", action="store_true", help="single poll then exit (test)")
 
     lv = sub.add_parser("levels", help="print today's GEX map (chain snapshot)")
@@ -171,7 +174,7 @@ def main() -> None:
             run_watch(underlying=args.underlying, interval=args.interval,
                   expiries=args.expiries, window=args.window,
                   tranche=args.tranche, shadow=not args.no_shadow,
-                      once=args.once)
+                      once=args.once, flow=not args.no_flow)
         except KeyboardInterrupt:
             console.print("\n[yellow]watch stopped (state saved).")
     elif args.cmd == "explore":

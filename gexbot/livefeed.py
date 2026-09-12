@@ -206,10 +206,45 @@ def _parse(ticker: str):
 
 
 # ── combining OI baseline with live flow ─────────────────────────────
+def gamma_lookup(contracts: list[dict]) -> dict[tuple, float]:
+    """Per-contract gamma from a chain snapshot, keyed the way the feed asks.
+
+    `OptionsFeed` parses OPRA tickers into (root, 'YYMMDD', 'C'|'P', strike),
+    so the key has to be in those terms rather than the snapshot's own
+    ('call', '2026-09-14'). A strike outside the fetched window has no gamma
+    here and its flow is skipped — which is correct, not a gap: the OI
+    baseline is bounded by the same window, and inventing a gamma for a
+    strike we never priced would put fiction into the overlay.
+    """
+    out: dict[tuple, float] = {}
+    for c in contracts:
+        d = c.get("details") or {}
+        g = (c.get("greeks") or {}).get("gamma")
+        strike, right, exp = (d.get("strike_price"), d.get("contract_type"),
+                              d.get("expiration_date"))
+        if g is None or strike is None or right not in ("call", "put") or not exp:
+            continue
+        yymmdd = f"{exp[2:4]}{exp[5:7]}{exp[8:10]}"      # 2026-09-14 -> 260914
+        out[(float(strike), "C" if right == "call" else "P", yymmdd)] = float(g)
+    return out
+
+
 def combine(oi_profile: dict, flow: dict[float, float]) -> dict:
     """Sum the OI baseline and today's flow overlay, recompute levels.
-    Returns the same shape as levels.build_profile, plus flow diagnostics."""
-    merged = dict(oi_profile.get("by_strike") or {})
+
+    Returns the same shape as levels.build_profile, plus flow diagnostics and
+    — importantly for the state store — the per-strike SPLIT that produced
+    the merged number.
+
+    The split covers every merged strike with an explicit 0.0 rather than
+    leaving gaps. Once the overlay is running, both components are measured
+    at every strike in the window: a strike with no classified trades has a
+    flow of exactly zero, not an unknown one. That keeps NULL in
+    `poll_strike` meaning one thing only — the overlay was off — instead of
+    being ambiguous between "not measured" and "measured as nothing".
+    """
+    oi_baseline = dict(oi_profile.get("by_strike") or {})
+    merged = dict(oi_baseline)
     for k, v in flow.items():
         merged[k] = merged.get(k, 0.0) + v
 
@@ -246,5 +281,7 @@ def combine(oi_profile: dict, flow: dict[float, float]) -> dict:
         "flow_net": sum(flow.values()),
         "flow_strikes": len(flow),
         "oi_net": oi_profile.get("net", 0.0),
+        "oi_by_strike": {k: float(oi_baseline.get(k, 0.0)) for k in merged},
+        "flow_by_strike": {k: float(flow.get(k, 0.0)) for k in merged},
     })
     return out
