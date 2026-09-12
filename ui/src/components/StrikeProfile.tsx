@@ -4,13 +4,16 @@ import { useMemo, useState } from "react";
 import type { Level, Strike } from "../api/types";
 import { money, price } from "./format";
 
-export type Source = "flow" | "oi";
+export type Source = "flow" | "oi" | "volume";
 
 interface Props {
   strikes: Strike[];
   levels: Level[];
   spot: number;
   overlayOn: boolean;
+  /** §10.1 display transform. Strikes are divided by this; gamma is not. */
+  divisor: number;
+  unitsLabel: string;
 }
 
 const OI_COLOUR_POS = "#2f6f9f";
@@ -39,9 +42,14 @@ const LEVEL_STYLE: Record<Level["kind"], { colour: string; text: string }> = {
  * level is called: `label` arrives already computed by levels.level_label, so
  * the chart and the Discord alert cannot disagree.
  */
-export function StrikeProfile({ strikes, levels, spot, overlayOn }: Props) {
+export function StrikeProfile({ strikes, levels, spot, overlayOn, divisor,
+                                unitsLabel }: Props) {
   const [source, setSource] = useState<Source>("flow");
-  const effective: Source = overlayOn ? source : "oi";
+  const hasVolume = strikes.some((s) => s.volume !== null && s.volume !== undefined);
+  const effective: Source =
+    source === "flow" && !overlayOn ? "oi"
+    : source === "volume" && !hasVolume ? "oi"
+    : source;
 
   const rows = useMemo(
     () => [...strikes].sort((a, b) => b.strike - a.strike),
@@ -49,6 +57,12 @@ export function StrikeProfile({ strikes, levels, spot, overlayOn }: Props) {
   );
 
   const option = useMemo(() => {
+    // §10.1 is a DISPLAY transform, so the divisor touches formatting only.
+    // Categories, the spot index and the level indices all stay in raw
+    // strikes: scaling the values the axis is positioned by mixes a
+    // presentation concern into the geometry, and the bars stopped drawing
+    // when it did. `fmt` is the single place the transform is applied.
+    const fmt = (v: number) => price(v / divisor, divisor === 1 ? 0 : 2);
     const categories = rows.map((r) => r.strike);
 
     // Position of an arbitrary price on a category axis: interpolate between
@@ -102,7 +116,7 @@ export function StrikeProfile({ strikes, levels, spot, overlayOn }: Props) {
         yAxis: spotIdx,
         lineStyle: { color: "#e5e5e5", width: 1.5, type: "solid" as const },
         label: {
-          formatter: `spot ${price(spot)}`,
+          formatter: `spot ${fmt(spot)}`,
           position: "start" as const,
           color: "#0a0a0a",
           backgroundColor: "#e5e5e5",
@@ -132,6 +146,46 @@ export function StrikeProfile({ strikes, levels, spot, overlayOn }: Props) {
       })),
     ];
 
+    if (effective === "volume") {
+      // Activity, not positioning: unsigned counts, deliberately a different
+      // colour family from the signed gamma bars so the two are never read
+      // as the same quantity.
+      return {
+        backgroundColor: "transparent",
+        grid: { left: 62, right: 34, top: 16, bottom: 28 },
+        tooltip: { trigger: "axis" as const, backgroundColor: "#111",
+                   borderColor: "#333", textStyle: { color: "#e5e5e5", fontSize: 11 },
+                   formatter: (params: any) => {
+                     const r = rows[params?.[0]?.dataIndex ?? 0];
+                     return r ? `<b>${fmt(r.strike)}</b>`
+                       + `<div style="color:#888">day volume `
+                       + `<span style="color:#e5e5e5">${Math.round(r.volume ?? 0).toLocaleString()}</span></div>` : "";
+                   } },
+        xAxis: { type: "value" as const,
+                 axisLabel: { color: "#666", fontSize: 10 },
+                 splitLine: { lineStyle: { color: "#1f1f1f" } } },
+        yAxis: { type: "category" as const, inverse: true,
+                 data: categories.map(fmt),
+                 axisLabel: { color: "#777", fontSize: 10 },
+                 axisTick: { show: false }, splitLine: { show: false } },
+        dataZoom: [
+          { type: "slider" as const, yAxisIndex: 0,
+            startValue: Math.max(0, Math.round(spotIdx - span)),
+            endValue: Math.min(categories.length - 1, Math.round(spotIdx + span)),
+            width: 10, right: 4, fillerColor: "#ffffff12", borderColor: "#2a2a2a",
+            handleStyle: { color: "#555" }, textStyle: { color: "#666", fontSize: 9 } },
+          { type: "inside" as const, yAxisIndex: 0 },
+        ],
+        series: [{
+          name: "day volume", type: "bar" as const,
+          data: rows.map((r) => r.volume ?? 0),
+          itemStyle: { color: "#7a6f9f" },
+          barCategoryGap: "28%",
+          markLine: { silent: true, symbol: "none", data: markLines },
+        }],
+      };
+    }
+
     return {
       backgroundColor: "transparent",
       grid: { left: 62, right: 34, top: 16, bottom: 28 },
@@ -145,16 +199,18 @@ export function StrikeProfile({ strikes, levels, spot, overlayOn }: Props) {
           const i = params?.[0]?.dataIndex ?? 0;
           const r = rows[i];
           if (!r) return "";
-          const dPts = r.strike - spot;
-          const dPct = spot ? (dPts / spot) * 100 : 0;
+          const dPts = (r.strike - spot) / divisor;
+          const dPct = spot ? ((r.strike - spot) / spot) * 100 : 0;
           const line = (k: string, v: string) =>
             `<div style="display:flex;gap:10px;justify-content:space-between">
                <span style="color:#888">${k}</span><span>${v}</span></div>`;
           return (
-            `<b>${price(r.strike)}</b>` +
+            `<b>${fmt(r.strike)}</b>` +
             line("combined", money(r.gex)) +
             line("OI", r.oi_gex === null ? "— (overlay off)" : money(r.oi_gex)) +
             line("flow", r.flow_gex === null ? "— (overlay off)" : money(r.flow_gex)) +
+            line("day volume", r.volume === null || r.volume === undefined
+              ? "—" : Math.round(r.volume).toLocaleString()) +
             line("from spot", `${dPts >= 0 ? "+" : ""}${dPts.toFixed(0)} pts · ${dPct.toFixed(2)}%`)
           );
         },
@@ -167,7 +223,7 @@ export function StrikeProfile({ strikes, levels, spot, overlayOn }: Props) {
       yAxis: {
         type: "category" as const,
         inverse: true,
-        data: categories.map((c) => price(c)),
+        data: categories.map(fmt),
         axisLabel: { color: "#777", fontSize: 10 },
         axisTick: { show: false },
         splitLine: { show: false },
@@ -224,13 +280,16 @@ export function StrikeProfile({ strikes, levels, spot, overlayOn }: Props) {
               },
             ],
     };
-  }, [rows, levels, spot, effective]);
+  }, [rows, levels, spot, effective, divisor]);
 
   return (
     <section className="rounded-lg border border-neutral-800 bg-neutral-900/40">
       <div className="flex items-center justify-between border-b border-neutral-800 px-4 py-2">
         <h2 className="text-xs font-semibold uppercase tracking-widest text-neutral-500">
           Strike profile
+          <span className="ml-2 normal-case tracking-normal text-neutral-600">
+            strikes in {unitsLabel}
+          </span>
         </h2>
         <div className="flex items-center gap-1 text-xs">
           <Toggle
@@ -243,12 +302,13 @@ export function StrikeProfile({ strikes, levels, spot, overlayOn }: Props) {
           <Toggle active={effective === "oi"} onClick={() => setSource("oi")}>
             OI
           </Toggle>
-          <span
-            className="cursor-not-allowed rounded px-2 py-1 text-neutral-700"
-            title="Per-strike day volume is not stored yet — the UI shows no number it cannot source (spec §0)."
+          <Toggle
+            active={effective === "volume"}
+            disabled={!hasVolume}
+            onClick={() => setSource("volume")}
           >
             volume
-          </span>
+          </Toggle>
         </div>
       </div>
 
@@ -261,7 +321,13 @@ export function StrikeProfile({ strikes, levels, spot, overlayOn }: Props) {
       />
 
       <p className="border-t border-neutral-800 px-4 py-2 text-xs text-neutral-600">
-        {overlayOn ? (
+        {effective === "volume" ? (
+          <>
+            Unsigned contracts traded today per strike —{" "}
+            <span className="text-neutral-500">activity, not positioning</span>.
+            It says nothing about who initiated or which way dealers are hedged.
+          </>
+        ) : overlayOn ? (
           <>
             Stacked: OI baseline + today&rsquo;s classified flow. Flow is signed
             by the tick rule, roughly 75–80% accurate versus NBBO —{" "}

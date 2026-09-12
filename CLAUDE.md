@@ -55,7 +55,7 @@ forms."*
 ### What is nonetheless solid
 
 A pipeline that survives 7-billion-row days; ledgers, greeks, entry/exit/
-discipline engines (129 tests passing *(verify)*); honest REST NBBO marks
+discipline engines (137 tests passing *(verify)*); honest REST NBBO marks
 with provenance tracking; a backtest runner with era splits and executable
 gates; a four-arm control harness; put-call-parity spot reconstruction for
 pre-2023; Discord alerting; a results explorer. None of this is invalidated
@@ -242,8 +242,9 @@ All commands: `python -m gexbot <cmd>`. Dates are ISO (`2024-01-02`).
 | `control` | `--start`, `--end` (required), `--seeds` (20), `--tranche` | **The Stage 1 test.** Null-model experiment: does the GEX entry beat random? |
 | `sweep` | `--start`, `--end`, `--param`, `--values` (required), `--tranche`, `--full-strategy`, `--max-dd` (0.12) | Parameter grid → gate frontier. Breakout-only by default. Reports plateaus vs peaks. **Gated behind Stage 1.** |
 | `levels` | `--underlying` (I:SPX), `--model {naive,short_all}`, `--expiries` (2), `--window` (0.06), `--per-1pct` | Print today's GEX map from a live chain snapshot. |
-| `watch` | `--underlying`, `--interval` (180s), `--expiries`, `--window`, `--tranche`, `--no-shadow`, `--no-flow`, `--once` | Structural alerts (09:00-16:15 ET) + shadow narration. REST chain snapshots plus the live WebSocket flow overlay. |
+| `watch` | `--underlying {I:SPX,SPY}`, `--complex`, `--interval` (180s), `--expiries`, `--window`, `--tranche`, `--no-shadow`, `--no-flow`, `--once` | Structural alerts (09:00-16:15 ET) + shadow narration. REST chain snapshots plus the live WebSocket flow overlay. |
 | `explore` | — | Streamlit results explorer on `GEX_DASHBOARD_PORT`, bound 127.0.0.1. |
+| `premarket` | `--date`, `--dry-run` | Overnight SPY range vs the last stored map, posted to `#daily`. Descriptive only. |
 | *(ui)* | `cd ui && npm run dev` | Operator dashboard on `GEX_DASHBOARD_PORT` (8741), proxying to the API. Three screens: Live, Session, Research. Not a `gexbot` subcommand. |
 | `api` | `--port` (8742) | Read-only state API + `/ws/live`. Binds 127.0.0.1 with no host flag — there is deliberately no way to expose it. |
 | `discord-test` | — | Send one test message to each configured webhook. |
@@ -261,6 +262,10 @@ it silently changes what was tested.
 gexbot/
   config.py       Typed pydantic settings — single source of truth.
                   No hardcoded paths/ports/parameters anywhere else.
+  instruments.py  SPX / SPY / COMPLEX definitions and the complex merge.
+                  Strike ×10, per-point gamma ÷10 — opposite directions; the
+                  reverse would inflate SPY 100× and dominate the merged map.
+  premarket.py    Overnight summary (§10.4). Descriptive only, by design.
   clock.py        THE timezone authority. UTC ns <-> ET minute-of-day via
                   zoneinfo, scalar + vectorized + inverse. Never reintroduce a
                   hardcoded UTC offset; import from here. watch.minute_now()
@@ -336,7 +341,7 @@ flat 15:50, max 3 trades/day (5 on range days), 2 losing trades ends the day,
 ```bash
 uv venv && source .venv/bin/activate && uv pip install -e ".[dev]"
 cp .env.example .env          # fill Massive keys + GEX_DATA_ROOT
-python -m pytest -q           # 129 passing
+python -m pytest -q           # 137 passing
 ruff check .                  # line-length 100
 ```
 
@@ -353,9 +358,19 @@ live), ports 8741/8742. **Never commit `.env`; never send creds anywhere.**
 
 **Open**
 
-- **`docs/PHASE3_UI_SPEC.md` has no §10.** The `underlying` column was built
-  from a one-line instruction, not a written spec; the design choices are in
-  commit d502ff6 and may need correcting.
+- **SPY×10 is not SPX.** The ETF carries a persistent basis to the index
+  (dividends, expense, tracking) — measured at ~0.2%, or ~15 SPX points,
+  which is *wider than the proximity window a level alert uses*. §10.3's
+  merged book and §10.4's overnight comparison both use the spec's flat ÷10,
+  so SPY gamma lands slightly off its true SPX level. The pre-market summary
+  now reports the measured basis so a reader can discount it; the COMPLEX map
+  does not yet. Scaling by the observed spot ratio instead of a constant would
+  fix it and is not yet agreed.
+- **COMPLEX never alerts and is never a default** (§10.3). It is a model
+  change, not a completeness fix: it moves walls and can change a regime call.
+  SPX-only and SPY-only are stored in parallel whenever `--complex` runs, so
+  the comparison record accumulates — the test must be specified before that
+  record is read (PREREGISTRATION §2).
 - **Screen 2 has only been seen with synthetic data.** The real store holds a
   handful of after-hours polls and no premium rows, so the session panels were
   verified against a seeded throwaway database. A real session is needed.

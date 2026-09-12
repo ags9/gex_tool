@@ -75,12 +75,23 @@ def main() -> None:
     ir.add_argument("--start", type=dt.date.fromisoformat, default=settings.gex_start_date)
     ir.add_argument("--end", type=dt.date.fromisoformat, default=settings.end_date)
 
+    pm = sub.add_parser("premarket",
+                        help="overnight range vs the last stored map; posts to #daily")
+    pm.add_argument("--date", type=dt.date.fromisoformat, default=None)
+    pm.add_argument("--dry-run", action="store_true",
+                    help="print the summary without posting to Discord")
+
     ap = sub.add_parser("api", help="serve the read-only state API (localhost only)")
     ap.add_argument("--port", type=int, default=settings.gex_api_port,
                     help="default %(default)s (GEX_API_PORT)")
 
     wt = sub.add_parser("watch", help="market-hours structural alerts + shadow trade narration")
-    wt.add_argument("--underlying", default="I:SPX")
+    wt.add_argument("--underlying", default="I:SPX", choices=["I:SPX", "SPY"],
+                    help="the instrument that ALERTS (default %(default)s)")
+    wt.add_argument("--complex", dest="complex_map", action="store_true",
+                    help="also compute and store the other instrument and the "
+                         "merged S&P complex book, in parallel and SILENT — "
+                         "the combined map never alerts (spec §10.3)")
     wt.add_argument("--interval", type=int, default=180, help="seconds between polls")
     wt.add_argument("--expiries", type=int, default=2)
     wt.add_argument("--window", type=float, default=0.06)
@@ -172,9 +183,13 @@ def main() -> None:
             run_watch(underlying=args.underlying, interval=args.interval,
                   expiries=args.expiries, window=args.window,
                   tranche=args.tranche, shadow=not args.no_shadow,
-                      once=args.once, flow=not args.no_flow)
+                      once=args.once, flow=not args.no_flow,
+                      complex_map=args.complex_map)
         except KeyboardInterrupt:
             console.print("\n[yellow]watch stopped (state saved).")
+    elif args.cmd == "premarket":
+        from .premarket import run_premarket
+        raise SystemExit(run_premarket(day=args.date, dry_run=args.dry_run))
     elif args.cmd == "api":
         from .api import run_api
         run_api(port=args.port)

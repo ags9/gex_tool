@@ -156,13 +156,28 @@ class OptionsFeed:
     """Background WebSocket client. Never raises into the caller; reconnects
     with exponential backoff; tracks connection health."""
 
-    def __init__(self, api_key: str, ledger: FlowLedger,
-                 gamma_fn, spot_fn, *, roots=SESSION_ROOTS,
-                 on_status=None):
+    def __init__(self, api_key: str, ledger_for, gamma_fn, spot_fn, *,
+                 roots=SESSION_ROOTS, on_status=None):
+        """`ledger_for(root)` picks the book a print belongs to.
+
+        One book per instrument, never one shared book: a SPY print at strike
+        765 and an SPX print at 7,650 describe the same price level but are
+        different contracts, and adding them into one per-strike dict would
+        silently corrupt both maps. `gamma_fn` takes the root for the same
+        reason — the gamma of "the 765 call" is meaningless without it.
+
+        A plain FlowLedger is accepted for the single-instrument case.
+        """
         self.api_key = api_key
-        self.ledger = ledger
-        self.gamma_fn = gamma_fn          # (strike, right, expiry) -> gamma
-        self.spot_fn = spot_fn            # () -> current spot
+        if isinstance(ledger_for, FlowLedger):
+            single = ledger_for
+            self.ledger_for = lambda _root: single
+            self.ledger = single
+        else:
+            self.ledger_for = ledger_for
+            self.ledger = None
+        self.gamma_fn = gamma_fn          # (root, strike, right, expiry) -> gamma
+        self.spot_fn = spot_fn            # (root) -> current spot
         self.roots = roots
         self.on_status = on_status
         self.classifier = TickRuleClassifier()
@@ -230,14 +245,17 @@ class OptionsFeed:
         root, expiry, right, strike = parsed
         if root not in self.roots:
             return
+        ledger = self.ledger_for(root)
+        if ledger is None:
+            return
         # Premium counts every print in our roots, side or no side: the
         # unclassified tally is only honest if the zero-ticks reach it.
-        self.ledger.add_premium(right, size, float(price), side)
+        ledger.add_premium(right, size, float(price), side)
         if not side:
             return
-        gamma = self.gamma_fn(strike, right, expiry)
+        gamma = self.gamma_fn(root, strike, right, expiry)
         if gamma:
-            self.ledger.add(strike, size, side, gamma, self.spot_fn())
+            ledger.add(strike, size, side, gamma, self.spot_fn(root))
 
 
 def _parse(ticker: str):
@@ -253,7 +271,7 @@ def _parse(ticker: str):
 
 
 # ── combining OI baseline with live flow ─────────────────────────────
-def gamma_lookup(contracts: list[dict]) -> dict[tuple, float]:
+def gamma_lookup(contracts: list[dict], root: str | None = None) -> dict[tuple, float]:
     """Per-contract gamma from a chain snapshot, keyed the way the feed asks.
 
     `OptionsFeed` parses OPRA tickers into (root, 'YYMMDD', 'C'|'P', strike),
@@ -272,7 +290,8 @@ def gamma_lookup(contracts: list[dict]) -> dict[tuple, float]:
         if g is None or strike is None or right not in ("call", "put") or not exp:
             continue
         yymmdd = f"{exp[2:4]}{exp[5:7]}{exp[8:10]}"      # 2026-09-14 -> 260914
-        out[(float(strike), "C" if right == "call" else "P", yymmdd)] = float(g)
+        key = (float(strike), "C" if right == "call" else "P", yymmdd)
+        out[key if root is None else (root, *key)] = float(g)
     return out
 
 
@@ -329,6 +348,7 @@ def combine(oi_profile: dict, flow: dict[float, float]) -> dict:
         "flow_strikes": len(flow),
         "oi_net": oi_profile.get("net", 0.0),
         "oi_by_strike": {k: float(oi_baseline.get(k, 0.0)) for k in merged},
+        "volume_by_strike": dict(oi_profile.get("volume_by_strike") or {}),
         "flow_by_strike": {k: float(flow.get(k, 0.0)) for k in merged},
     })
     return out

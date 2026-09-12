@@ -20,7 +20,9 @@ import duckdb
 
 from ..clock import ET
 from ..config import settings
-from ..state import connect, default_path
+from ..state import DEFAULT_UNDERLYING, connect, default_path
+
+ALL_UNDERLYINGS = "*"        # explicit opt-out of the I:SPX default
 
 # Market hours in ET minutes-of-day, used only to decide whether silence from
 # the engine is alarming or expected.
@@ -30,9 +32,16 @@ STALE_SECONDS = 300          # spec §4.3: >5 min without a poll in-hours = not 
 
 
 def _underlying_clause(underlying: str | None) -> tuple[str, list]:
-    """Optional filter. None means every underlying, which is what a store
-    with only I:SPX in it should keep returning."""
-    return (" WHERE underlying = ?", [underlying]) if underlying else ("", [])
+    """Filter, defaulting to I:SPX (spec §10.2).
+
+    The default matters now that SPY and COMPLEX write their own rows: an
+    unfiltered "latest poll" would return whichever instrument happened to be
+    written last, so the screen would silently change instrument between
+    refreshes. ALL_UNDERLYINGS is the explicit opt-out.
+    """
+    if underlying == ALL_UNDERLYINGS:
+        return ("", [])
+    return (" WHERE underlying = ?", [underlying or DEFAULT_UNDERLYING])
 
 
 def _connect(path: Path | str):
@@ -139,7 +148,7 @@ class StateReader:
                 return None
             poll = polls[0]
             poll["strikes"] = _dicts(
-                con, """SELECT strike, gex, oi_gex, flow_gex FROM poll_strike
+                con, """SELECT strike, gex, oi_gex, flow_gex, volume FROM poll_strike
                         WHERE poll_id=? ORDER BY strike""", [poll["poll_id"]])
             self._label_strikes(poll["strikes"], poll["spot"])
             poll["position"] = self._open_position(con)
@@ -262,13 +271,14 @@ class StateReader:
         if to_minute is not None:
             sql += " AND minute_of_day <= ?"
             params.append(to_minute)
-        if underlying:
+        if underlying != ALL_UNDERLYINGS:
             sql += " AND underlying = ?"
-            params.append(underlying)
+            params.append(underlying or DEFAULT_UNDERLYING)
         with _connect(self.path) as con:
             return _dicts(con, sql + " ORDER BY poll_id", params)
 
-    def profile_at(self, session_date: dt.date, minute: int | None = None) -> dict | None:
+    def profile_at(self, session_date: dt.date, minute: int | None = None,
+                   underlying: str | None = None) -> dict | None:
         """The map as it stood at `minute` — or the nearest poll at or before
         it. 'Nearest before', never nearest-either-side: showing a map built
         after the moment asked about would answer a different question than
@@ -279,6 +289,9 @@ class StateReader:
         with _connect(self.path) as con:
             sql = "SELECT * FROM poll_snapshot WHERE session_date=?"
             params: list = [session_date]
+            if underlying != ALL_UNDERLYINGS:
+                sql += " AND underlying = ?"
+                params.append(underlying or DEFAULT_UNDERLYING)
             if minute is not None:
                 sql += " AND minute_of_day <= ?"
                 params.append(minute)
@@ -288,7 +301,7 @@ class StateReader:
                 return None
             poll = rows[0]
             poll["strikes"] = _dicts(
-                con, """SELECT strike, gex, oi_gex, flow_gex FROM poll_strike
+                con, """SELECT strike, gex, oi_gex, flow_gex, volume FROM poll_strike
                         WHERE poll_id=? ORDER BY strike""", [poll["poll_id"]])
             poll["requested_minute"] = minute
             self._label_strikes(poll["strikes"], poll["spot"])
@@ -329,23 +342,38 @@ class StateReader:
         return {"minutes": minutes, "strikes": strikes,
                 "cells": [[r[0], r[1], r[2]] for r in rows]}
 
-    def alerts(self, session_date: dt.date) -> list[dict]:
+    def alerts(self, session_date: dt.date,
+               underlying: str | None = None) -> list[dict]:
         if not self.exists:
             return []
+        u = None if underlying == ALL_UNDERLYINGS else (underlying or DEFAULT_UNDERLYING)
         with _connect(self.path) as con:
+            if u is None:
+                return _dicts(con, """SELECT a.* FROM alert_log a
+                                      WHERE CAST(a.ts AS DATE) = ?
+                                         OR a.poll_id IN (SELECT poll_id FROM
+                                            poll_snapshot WHERE session_date = ?)
+                                      ORDER BY a.alert_id""",
+                              [session_date, session_date])
             return _dicts(con, """SELECT a.* FROM alert_log a
-                                  WHERE CAST(a.ts AS DATE) = ?
-                                     OR a.poll_id IN (SELECT poll_id FROM
-                                        poll_snapshot WHERE session_date = ?)
+                                  WHERE a.underlying = ?
+                                    AND (CAST(a.ts AS DATE) = ?
+                                         OR a.poll_id IN (SELECT poll_id FROM
+                                            poll_snapshot WHERE session_date = ?))
                                   ORDER BY a.alert_id""",
-                          [session_date, session_date])
+                          [u, session_date, session_date])
 
-    def trades(self, session_date: dt.date) -> list[dict]:
+    def trades(self, session_date: dt.date,
+               underlying: str | None = None) -> list[dict]:
         if not self.exists:
             return []
+        sql = "SELECT * FROM shadow_trade WHERE session_date=?"
+        params: list = [session_date]
+        if underlying != ALL_UNDERLYINGS:
+            sql += " AND underlying = ?"
+            params.append(underlying or DEFAULT_UNDERLYING)
         with _connect(self.path) as con:
-            return _dicts(con, "SELECT * FROM shadow_trade WHERE session_date=? "
-                               "ORDER BY trade_id", [session_date])
+            return _dicts(con, sql + " ORDER BY trade_id", params)
 
     def underlyings(self) -> list[str]:
         if not self.exists:
@@ -386,7 +414,7 @@ class StateReader:
                                 "ORDER BY poll_id", [poll_id])
             for p in polls:
                 p["strikes"] = _dicts(
-                    con, """SELECT strike, gex, oi_gex, flow_gex FROM poll_strike
+                    con, """SELECT strike, gex, oi_gex, flow_gex, volume FROM poll_strike
                             WHERE poll_id=? ORDER BY strike""", [p["poll_id"]])
         return polls
 
@@ -410,7 +438,8 @@ class StateReader:
                                   WHERE trade_id > ? OR exit_ts IS NOT NULL
                                   ORDER BY trade_id""", [stamp])
 
-    def live_tick(self, last_poll: int, last_alert: int) -> dict:
+    def live_tick(self, last_poll: int, last_alert: int,
+                  underlying: str | None = None) -> dict:
         """Everything the WebSocket needs for one tick, on ONE connection.
 
         Four separate reader calls per second kept a read lock open almost
@@ -419,12 +448,19 @@ class StateReader:
         """
         if not self.exists:
             return {"polls": [], "alerts": [], "trades": []}
+        u = None if underlying == ALL_UNDERLYINGS else (underlying or DEFAULT_UNDERLYING)
         with _connect(self.path) as con:
-            polls = _dicts(con, "SELECT * FROM poll_snapshot WHERE poll_id > ? "
-                                "ORDER BY poll_id", [last_poll])
+            # Filtered: with SPY and COMPLEX writing in parallel, an
+            # unfiltered stream would flip the screen between instruments
+            # mid-session without the operator asking for it.
+            polls = _dicts(con,
+                           "SELECT * FROM poll_snapshot WHERE poll_id > ?"
+                           + ("" if u is None else " AND underlying = ?")
+                           + " ORDER BY poll_id",
+                           [last_poll] + ([] if u is None else [u]))
             for p in polls:
                 p["strikes"] = _dicts(
-                    con, """SELECT strike, gex, oi_gex, flow_gex FROM poll_strike
+                    con, """SELECT strike, gex, oi_gex, flow_gex, volume FROM poll_strike
                             WHERE poll_id=? ORDER BY strike""", [p["poll_id"]])
                 # A pushed poll is self-describing: carrying the previous
                 # poll's levels and regime alongside a new spot would put two
@@ -433,19 +469,27 @@ class StateReader:
                 p["context"] = self.context(p, p["strikes"], con)
                 p["position"] = self._open_position(con)
                 p["as_of"] = p["ts"]
-            alerts = _dicts(con, "SELECT * FROM alert_log WHERE alert_id > ? "
-                                 "ORDER BY alert_id", [last_alert])
-            trades = _dicts(con, "SELECT * FROM shadow_trade ORDER BY trade_id")
+            alerts = _dicts(con,
+                            "SELECT * FROM alert_log WHERE alert_id > ?"
+                            + ("" if u is None else " AND underlying = ?")
+                            + " ORDER BY alert_id",
+                            [last_alert] + ([] if u is None else [u]))
+            trades = _dicts(con, "SELECT * FROM shadow_trade"
+                            + ("" if u is None else " WHERE underlying = ?")
+                            + " ORDER BY trade_id", [] if u is None else [u])
         return {"polls": polls, "alerts": alerts, "trades": trades}
 
-    def max_ids(self) -> tuple[int, int]:
+    def max_ids(self, underlying: str | None = None) -> tuple[int, int]:
         if not self.exists:
             return (0, 0)
+        u = None if underlying == ALL_UNDERLYINGS else (underlying or DEFAULT_UNDERLYING)
         with _connect(self.path) as con:
-            p = con.execute("SELECT coalesce(max(poll_id), 0) "
-                            "FROM poll_snapshot").fetchone()[0]
-            a = con.execute("SELECT coalesce(max(alert_id), 0) "
-                            "FROM alert_log").fetchone()[0]
+            p = con.execute("SELECT coalesce(max(poll_id), 0) FROM poll_snapshot"
+                            + ("" if u is None else " WHERE underlying = ?"),
+                            [] if u is None else [u]).fetchone()[0]
+            a = con.execute("SELECT coalesce(max(alert_id), 0) FROM alert_log"
+                            + ("" if u is None else " WHERE underlying = ?"),
+                            [] if u is None else [u]).fetchone()[0]
         return (int(p), int(a))
 
 

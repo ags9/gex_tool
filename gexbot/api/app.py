@@ -106,8 +106,10 @@ def create_app(db_path=None, results_root=None) -> FastAPI:
 
     @app.get("/api/session/{date}/profile")
     async def session_profile(date: str,
-                              minute: int | None = Query(None, ge=0, le=1440)):
-        poll = await asyncio.to_thread(reader.profile_at, _date(date), minute)
+                              minute: int | None = Query(None, ge=0, le=1440),
+                              underlying: str | None = Query(None)):
+        poll = await asyncio.to_thread(reader.profile_at, _date(date), minute,
+                                       underlying)
         if poll is None:
             raise HTTPException(404, f"no poll on {date} at or before "
                                      f"minute {minute}")
@@ -124,12 +126,12 @@ def create_app(db_path=None, results_root=None) -> FastAPI:
                                        underlying)
 
     @app.get("/api/session/{date}/alerts")
-    async def session_alerts(date: str):
-        return await asyncio.to_thread(reader.alerts, _date(date))
+    async def session_alerts(date: str, underlying: str | None = Query(None)):
+        return await asyncio.to_thread(reader.alerts, _date(date), underlying)
 
     @app.get("/api/session/{date}/trades")
-    async def session_trades(date: str):
-        return await asyncio.to_thread(reader.trades, _date(date))
+    async def session_trades(date: str, underlying: str | None = Query(None)):
+        return await asyncio.to_thread(reader.trades, _date(date), underlying)
 
     @app.get("/api/sessions")
     async def sessions(limit: int = Query(30, ge=1, le=500)):
@@ -151,10 +153,11 @@ def create_app(db_path=None, results_root=None) -> FastAPI:
     @app.websocket("/ws/live")
     async def ws_live(ws: WebSocket):
         await ws.accept()
-        last_poll, last_alert = await asyncio.to_thread(reader.max_ids)
+        underlying = ws.query_params.get("underlying") or None
+        last_poll, last_alert = await asyncio.to_thread(reader.max_ids, underlying)
         trade_state: dict[int, object] = {}
 
-        snapshot = await asyncio.to_thread(reader.latest)
+        snapshot = await asyncio.to_thread(reader.latest, underlying)
         if snapshot is not None:
             snapshot["as_of"] = snapshot["ts"]
         await ws.send_json(jsonable_encoder(
@@ -170,7 +173,7 @@ def create_app(db_path=None, results_root=None) -> FastAPI:
 
                 # one connection per tick, not four — see reader.live_tick
                 tick = await asyncio.to_thread(reader.live_tick,
-                                               last_poll, last_alert)
+                                               last_poll, last_alert, underlying)
 
                 for poll in tick["polls"]:
                     last_poll = max(last_poll, poll["poll_id"])

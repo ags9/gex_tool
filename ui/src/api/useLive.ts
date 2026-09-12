@@ -32,7 +32,7 @@ const ALERT_BUFFER = 50;
  * established at all we fall back to a single REST read so the strip can say
  * something truthful instead of nothing.
  */
-export function useLive(): LiveState {
+export function useLive(underlying?: string): LiveState {
   const [state, setState] = useState<LiveState>({
     conn: "connecting",
     poll: null,
@@ -64,7 +64,7 @@ export function useLive(): LiveState {
     void (async () => {
       try {
         const [latest, health] = await Promise.all([
-          api.latest(ac.signal).catch(() => null),
+          api.latest(underlying, ac.signal).catch(() => null),
           api.health(ac.signal).catch(() => null),
         ]);
         if (cancelled) return;
@@ -86,7 +86,8 @@ export function useLive(): LiveState {
     const connect = () => {
       if (cancelled) return;
       const proto = window.location.protocol === "https:" ? "wss" : "ws";
-      const sock = new WebSocket(`${proto}://${window.location.host}/ws/live`);
+      const qs = underlying ? `?underlying=${encodeURIComponent(underlying)}` : "";
+      const sock = new WebSocket(`${proto}://${window.location.host}/ws/live${qs}`);
       socket = sock;
 
       // `socket !== sock` means this handler belongs to a superseded
@@ -134,7 +135,9 @@ export function useLive(): LiveState {
       socket = null;            // any in-flight handler now reads as stale
       dying?.close();
     };
-  }, []);
+    // Switching instrument tears the socket down and reconnects: the server
+    // filters the stream, so a stale socket would keep pushing the old map.
+  }, [underlying]);
 
   return state;
 }

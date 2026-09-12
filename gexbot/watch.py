@@ -30,6 +30,7 @@ from rich.console import Console
 from .clock import ET
 from .config import settings
 from .levels import BASE, build_profile, fetch_chain, fetch_index_spot
+from .instruments import COMPLEX, INSTRUMENTS, instrument, merge_complex, root_owner
 from .livefeed import FlowLedger, OptionsFeed, combine, gamma_lookup
 from .notify import Channel, Color, DiscordNotifier
 from .state import StateStore, default_path
@@ -579,7 +580,11 @@ def run_watch(*, underlying: str = "I:SPX", interval: int = 180,
               expiries: int = 2, window: float = 0.06,
               tranche: float = 3000.0, shadow: bool = True,
               once: bool = False, state_db: Path | None = None,
-              flow: bool = True) -> None:
+              flow: bool = True, complex_map: bool = False) -> None:
+    """`underlying` is the instrument that ALERTS. `complex_map` additionally
+    computes and stores the other instruments and the merged COMPLEX book, in
+    parallel and silently (spec §10.3) — the comparison record accumulates
+    without the combined model ever driving a message."""
     key = os.getenv("MASSIVE_API_KEY", "")
     if not key or key == "your_key_here":
         console.print("[red]MASSIVE_API_KEY not set")
@@ -592,7 +597,7 @@ def run_watch(*, underlying: str = "I:SPX", interval: int = 180,
     }, paper_mode=False)          # shadow tagging is explicit in the text
 
     store = StateStore(state_db or default_path())
-    n = AlertSink(notifier, store, underlying)
+    n = AlertSink(notifier, store, underlying if underlying != COMPLEX else "I:SPX")
 
     state_path = Path(settings.gex_data_root) / "watch_state.json"
     st = WatchState.load(state_path)
@@ -612,24 +617,40 @@ def run_watch(*, underlying: str = "I:SPX", interval: int = 180,
     # volume. The feed classifies today's prints and layers them on top.
     # It runs in its own thread and never raises into this loop; if it cannot
     # connect, the map degrades to the OI baseline rather than stopping.
-    ledger = FlowLedger()
+    # Which instruments this session computes. The alerting one is always
+    # first; COMPLEX is derived from the others, never fetched.
+    primary = underlying if underlying != COMPLEX else "I:SPX"
+    instrument(primary)                              # validates, or exits
+    computed = [primary]
+    if complex_map:
+        computed += [k for k in INSTRUMENTS if k != primary]
+
+    ledgers = {k: FlowLedger() for k in computed}
+    gamma_books: dict[str, dict] = {k: {} for k in computed}
+    spots = {k: 0.0 for k in computed}
     feed: OptionsFeed | None = None
-    gamma_book: dict[tuple, float] = {}
-    spot_box = {"spot": 0.0}
 
     if flow:
+        roots = tuple(r for k in computed for r in INSTRUMENTS[k].roots)
         feed = OptionsFeed(
-            key, ledger,
-            gamma_fn=lambda strike, right, expiry: gamma_book.get(
-                (float(strike), right, expiry), 0.0),
-            spot_fn=lambda: spot_box["spot"],
+            key,
+            ledger_for=lambda root: ledgers.get(root_owner(root) or ""),
+            gamma_fn=lambda root, strike, right, expiry: gamma_books.get(
+                root_owner(root) or "", {}).get(
+                    (root, float(strike), right, expiry), 0.0),
+            spot_fn=lambda root: spots.get(root_owner(root) or "", 0.0),
+            roots=roots,
             on_status=lambda state, detail: console.log(
                 f"[dim]feed {state}: {detail}"))
         feed.start()
-        console.print("[bold]flow overlay[/bold] · live WebSocket "
-                      "(OI baseline + today's classified prints)")
+        console.print(f"[bold]flow overlay[/bold] · live WebSocket · "
+                      f"roots {', '.join(roots)}")
     else:
         console.print("[yellow]flow overlay OFF — map is OI-only, blind to 0DTE")
+
+    console.print(f"[bold]instruments[/bold] · alerting on {primary}"
+                  + (f" · also storing {', '.join(computed[1:])} + {COMPLEX} "
+                     f"(silent)" if complex_map else ""))
 
     while True:
         m = minute_now()
@@ -640,29 +661,64 @@ def run_watch(*, underlying: str = "I:SPX", interval: int = 180,
         if st.day != day_now:
             console.log(f"[bold]new session {day_now} — resetting state")
             st = WatchState(day=day_now)
-            ledger.reset()
+            for lg in ledgers.values():
+                lg.reset()
         if not once and not (SESSION_OPEN - 30 <= m <= SESSION_CLOSE + 5):
             time.sleep(60)
             continue
         t0 = time.monotonic()
         try:
-            spot = fetch_index_spot(underlying, key)
-            exp_cap = (dt.date.today() + dt.timedelta(days=14)).isoformat()
-            contracts, csp = fetch_chain(underlying, key, spot_hint=spot,
-                                         strike_window=window,
-                                         expiry_before=exp_cap)
-            spot = csp or spot
-            spot_box["spot"] = spot
-            # refresh the gamma book each poll so the feed can price prints
-            # on strikes that have only just come into the window
-            if feed is not None:
-                gamma_book = gamma_lookup(contracts)
-            oi_prof = build_profile(contracts, spot, model="naive",
-                                    per_point=True, expiries=expiries,
-                                    strike_window=window)
-            # overlay today's classified flow on the OI baseline
-            prof = (combine(oi_prof, ledger.snapshot())
-                    if (feed is not None and oi_prof) else oi_prof)
+            profiles: dict[str, dict] = {}
+            for key_ in computed:
+                inst = INSTRUMENTS[key_]
+                sp = fetch_index_spot(inst.chain, key) if key_.startswith("I:") else 0.0
+                exp_cap = (dt.date.today() + dt.timedelta(days=14)).isoformat()
+                contracts, csp = fetch_chain(inst.chain, key, spot_hint=sp,
+                                             strike_window=window,
+                                             expiry_before=exp_cap)
+                sp = csp or sp
+                # one guard, not two: build_profile is the authority on
+                # whether a chain yields a profile, and it returns {} when it
+                # does not
+                if not sp:
+                    continue
+                spots[key_] = sp
+                if feed is not None:
+                    # keyed by root so a SPY 765 and an SPX 765 can never be
+                    # mistaken for one another
+                    gamma_books[key_] = {
+                        k: v for r in inst.roots
+                        for k, v in gamma_lookup(contracts, r).items()}
+                oi_p = build_profile(contracts, sp, model="naive",
+                                     per_point=True, expiries=expiries,
+                                     strike_window=window)
+                if not oi_p:
+                    continue
+                profiles[key_] = (combine(oi_p, ledgers[key_].snapshot())
+                                  if feed is not None else oi_p)
+
+            if complex_map and len(profiles) > 1:
+                merged = merge_complex(profiles)
+                if merged:
+                    profiles[COMPLEX] = merged
+
+            # Every instrument is stored; only the primary speaks.
+            poll_ms = int((time.monotonic() - t0) * 1000)
+            for key_, pr in profiles.items():
+                if key_ == primary:
+                    continue
+                pid = store.write_poll(
+                    pr, feed_stats=({"connected": feed.connected,
+                                     "trades": ledgers[key_].trades_seen,
+                                     "contracts": ledgers[key_].contracts_seen}
+                                    if feed is not None and key_ in ledgers else None),
+                    poll_ms=poll_ms, model="naive", per_point=True,
+                    underlying=key_)
+                if pid and feed is not None and key_ in ledgers:
+                    store.write_premium(pid, ledgers[key_].premium_snapshot())
+
+            prof = profiles.get(primary)
+            ledger = ledgers[primary]
             if prof:
                 flow_note = ""
                 if feed is not None:
@@ -680,8 +736,8 @@ def run_watch(*, underlying: str = "I:SPX", interval: int = 180,
                                  "trades": ledger.trades_seen,
                                  "contracts": ledger.contracts_seen}
                                 if feed is not None else None),
-                    poll_ms=int((time.monotonic() - t0) * 1000),
-                    model="naive", per_point=True, underlying=underlying)
+                    poll_ms=poll_ms,
+                    model="naive", per_point=True, underlying=primary)
                 if feed is not None and n.poll_id is not None:
                     store.write_premium(n.poll_id, ledger.premium_snapshot())
                 # Structural narration is silent outside 09:00-16:15 ET. The

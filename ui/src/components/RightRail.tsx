@@ -18,12 +18,13 @@ const LABEL_TONE: Record<Level["label"], string> = {
 };
 
 /** Spec §2.3. Three stacked cards, all reading engine-computed values. */
-export function RightRail({ poll }: { poll: LatestPoll }) {
+export function RightRail({ poll, divisor }: { poll: LatestPoll; divisor: number }) {
   return (
     <div className="space-y-4">
-      <NearestStructure strikes={poll.strikes} spot={poll.spot} levels={poll.context.levels} />
+      <NearestStructure strikes={poll.strikes} spot={poll.spot}
+                        levels={poll.context.levels} divisor={divisor} />
       <RegimeCard poll={poll} />
-      <ShadowPosition poll={poll} />
+      <ShadowPosition poll={poll} divisor={divisor} />
     </div>
   );
 }
@@ -48,11 +49,14 @@ function NearestStructure({
   strikes,
   spot,
   levels,
+  divisor,
 }: {
   strikes: Strike[];
   spot: number;
   levels: Level[];
+  divisor: number;
 }) {
+  const sc = (v: number) => v / divisor;
   const kindFor = new Map<number, string>();
   for (const l of levels) {
     kindFor.set(l.strike, [kindFor.get(l.strike), LEVEL_NAME[l.kind]]
@@ -79,7 +83,7 @@ function NearestStructure({
               >
                 <div className="flex items-baseline justify-between gap-2">
                   <span className="font-medium text-neutral-200">
-                    {price(s.strike)}
+                    {price(sc(s.strike), divisor === 1 ? 0 : 2)}
                   </span>
                   <span className="tabular-nums text-neutral-300">
                     {money(s.gex)}
@@ -92,7 +96,7 @@ function NearestStructure({
                   </span>
                   <span className="whitespace-nowrap text-neutral-500">
                     {d >= 0 ? "+" : ""}
-                    {d.toFixed(0)} pts
+                    {sc(d).toFixed(divisor === 1 ? 0 : 2)} pts
                   </span>
                 </div>
               </li>
@@ -142,22 +146,24 @@ function RegimeCard({ poll }: { poll: LatestPoll }) {
   );
 }
 
-function ShadowPosition({ poll }: { poll: LatestPoll }) {
+function ShadowPosition({ poll, divisor }: { poll: LatestPoll; divisor: number }) {
   const p = poll.context.position;
+  const sc = (v: number) => v / divisor;
   return (
     <Card title="Shadow position">
       {p ? (
         <>
           <p className="text-base font-semibold text-neutral-100">
-            {p.contracts}× {price(p.strike)}
+            {p.contracts}× {price(sc(p.strike), divisor === 1 ? 0 : 2)}
             {p.direction > 0 ? "C" : "P"}
           </p>
           <dl className="mt-2 space-y-1 text-xs">
             <Row k="expiry" v={String(p.expiry)} />
             <Row k="entry premium" v={`$${p.entry_premium.toFixed(2)}`} />
-            <Row k="entry spot" v={price(p.entry_spot)} />
-            <Row k="spot now" v={price(poll.spot)} />
-            <Row k="trigger level" v={price(p.level)} />
+            <Row k="entry spot" v={price(sc(p.entry_spot), divisor === 1 ? 0 : 2)} />
+            <Row k="spot now" v={price(sc(poll.spot), divisor === 1 ? 0 : 2)} />
+            <Row k="trigger level"
+                 v={p.level === null ? "—" : price(sc(p.level), divisor === 1 ? 0 : 2)} />
           </dl>
           <p className="mt-2 text-xs leading-snug text-neutral-500">{p.trigger}</p>
         </>

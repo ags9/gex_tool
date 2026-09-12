@@ -29,6 +29,14 @@ export function parseUtc(iso: string): Date {
   return new Date(hasZone ? iso : `${iso}Z`);
 }
 
+function q(params: Record<string, string | number | undefined>): string {
+  const s = Object.entries(params)
+    .filter(([, v]) => v !== undefined && v !== null && v !== "")
+    .map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`)
+    .join("&");
+  return s ? `?${s}` : "";
+}
+
 class ApiError extends Error {
   constructor(readonly status: number, readonly path: string, body: string) {
     super(`${status} ${path}${body ? ` — ${body}` : ""}`);
@@ -46,20 +54,22 @@ async function get<T>(path: string, signal?: AbortSignal): Promise<T> {
 
 export const api = {
   health: (signal?: AbortSignal) => get<Health>("/api/health", signal),
-  latest: (signal?: AbortSignal) =>
-    get<LatestPoll>("/api/session/latest", signal),
-  polls: (date: string, signal?: AbortSignal) =>
-    get<Poll[]>(`/api/session/${date}/polls`, signal),
+  latest: (underlying?: string, signal?: AbortSignal) =>
+    get<LatestPoll>(`/api/session/latest${q({ underlying })}`, signal),
+  polls: (date: string, underlying?: string, signal?: AbortSignal) =>
+    get<Poll[]>(`/api/session/${date}/polls${q({ underlying })}`, signal),
   profileAt: (date: string, minute: number, signal?: AbortSignal) =>
     get<LatestPoll>(`/api/session/${date}/profile?minute=${minute}`, signal),
-  alerts: (date: string, signal?: AbortSignal) =>
-    get<Alert[]>(`/api/session/${date}/alerts`, signal),
-  trades: (date: string, signal?: AbortSignal) =>
-    get<ShadowTrade[]>(`/api/session/${date}/trades`, signal),
+  alerts: (date: string, underlying?: string, signal?: AbortSignal) =>
+    get<Alert[]>(`/api/session/${date}/alerts${q({ underlying })}`, signal),
+  trades: (date: string, underlying?: string, signal?: AbortSignal) =>
+    get<ShadowTrade[]>(`/api/session/${date}/trades${q({ underlying })}`, signal),
   premium: (date: string, signal?: AbortSignal) =>
     get<Premium[]>(`/api/session/${date}/premium`, signal),
-  heatmap: (date: string, signal?: AbortSignal) =>
-    get<Heatmap>(`/api/session/${date}/heatmap`, signal),
+  heatmap: (date: string, underlying?: string, signal?: AbortSignal) =>
+    get<Heatmap>(`/api/session/${date}/heatmap${q({ underlying })}`, signal),
+  underlyings: (signal?: AbortSignal) =>
+    get<string[]>("/api/underlyings", signal),
   sessions: (limit = 30, signal?: AbortSignal) =>
     get<SessionSummary[]>(`/api/sessions?limit=${limit}`, signal),
   bundles: (signal?: AbortSignal) =>

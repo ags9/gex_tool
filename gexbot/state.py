@@ -108,6 +108,7 @@ CREATE TABLE IF NOT EXISTS poll_strike (
     gex              DOUBLE NOT NULL,
     oi_gex           DOUBLE,
     flow_gex         DOUBLE,
+    volume           DOUBLE,          -- unsigned day volume; activity, not positioning
     PRIMARY KEY (poll_id, strike)
 );
 
@@ -192,6 +193,7 @@ MIGRATIONS = (
     f"WHERE underlying IS NULL",
     f"UPDATE shadow_trade SET underlying = '{DEFAULT_UNDERLYING}' "
     f"WHERE underlying IS NULL",
+    "ALTER TABLE poll_strike ADD COLUMN IF NOT EXISTS volume DOUBLE",
     *(f"ALTER TABLE shadow_trade ADD COLUMN IF NOT EXISTS {c} DOUBLE"
       for c in ("entry_delta", "entry_gamma", "entry_theta", "entry_vega",
                 "entry_iv")),
@@ -289,12 +291,14 @@ class StateStore:
             by_strike = profile.get("by_strike") or {}
             oi_bs = profile.get("oi_by_strike") or {}
             flow_bs = profile.get("flow_by_strike") or {}
+            vol_bs = profile.get("volume_by_strike") or {}
             exps = profile.get("expiries") or []
             fs = feed_stats or {}
             rows = [
                 (pid, float(k), float(v),
                  float(oi_bs[k]) if k in oi_bs else None,
-                 float(flow_bs[k]) if k in flow_bs else None)
+                 float(flow_bs[k]) if k in flow_bs else None,
+                 float(vol_bs[k]) if k in vol_bs else None)
                 for k, v in by_strike.items()
             ]
             with connect(self.path) as con:
@@ -322,7 +326,9 @@ class StateStore:
                 )
                 if rows:
                     con.executemany(
-                        "INSERT INTO poll_strike VALUES (?,?,?,?,?)", rows)
+                        """INSERT INTO poll_strike
+                           (poll_id, strike, gex, oi_gex, flow_gex, volume)
+                           VALUES (?,?,?,?,?,?)""", rows)
             return pid
         except Exception as e:
             self._note(e, "write_poll")

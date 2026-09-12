@@ -262,7 +262,8 @@ def test_feed_routes_every_print_to_premium_including_zero_ticks():
     from gexbot.livefeed import OptionsFeed
 
     led = FlowLedger()
-    feed = OptionsFeed("k", led, gamma_fn=lambda *a: GAMMA, spot_fn=lambda: 7600.0)
+    feed = OptionsFeed("k", led, gamma_fn=lambda *a: GAMMA,
+                       spot_fn=lambda _root=None: 7600.0)
     t = "O:SPXW260914C07650000"
     for px in (12.0, 12.4, 12.4):      # none, uptick, zero-tick(inherits +1)
         feed._handle({"ev": "T", "sym": t, "p": px, "s": 10})

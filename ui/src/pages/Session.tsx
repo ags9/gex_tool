@@ -3,6 +3,13 @@ import { useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 
 import { api, isAbort } from "../api/client";
+import {
+  INSTRUMENT_LABEL,
+  INSTRUMENTS,
+  strikeDivisor,
+  useInstrument,
+  useUnits,
+} from "../api/prefs";
 import type { Alert, Heatmap, Poll, Premium, ShadowTrade } from "../api/types";
 import { money, price } from "../components/format";
 import { hhmm, todayEt } from "../components/minute";
@@ -35,6 +42,9 @@ const C = {
 export default function Session() {
   const { date } = useParams();
   const day = date ?? todayEt();
+  const [instrument, setInstrument] = useInstrument();
+  const [units] = useUnits();
+  const divisor = strikeDivisor(units, instrument);
   const [data, setData] = useState<Data | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -45,11 +55,11 @@ export default function Session() {
     void (async () => {
       try {
         const [polls, premium, heat, alerts, trades] = await Promise.all([
-          api.polls(day, ac.signal),
+          api.polls(day, instrument, ac.signal),
           api.premium(day, ac.signal),
-          api.heatmap(day, ac.signal),
-          api.alerts(day, ac.signal),
-          api.trades(day, ac.signal),
+          api.heatmap(day, instrument, ac.signal),
+          api.alerts(day, instrument, ac.signal),
+          api.trades(day, instrument, ac.signal),
         ]);
         if (!ac.signal.aborted) setData({ polls, premium, heat, alerts, trades });
       } catch (e) {
@@ -57,9 +67,12 @@ export default function Session() {
       }
     })();
     return () => ac.abort();
-  }, [day]);
+  }, [day, instrument]);
 
-  const option = useMemo(() => (data ? buildOption(data) : null), [data]);
+  const option = useMemo(
+    () => (data ? buildOption(data, divisor) : null),
+    [data, divisor],
+  );
 
   const asOf = data?.polls.length
     ? hhmm(data.polls[data.polls.length - 1].minute_of_day)
@@ -77,9 +90,26 @@ export default function Session() {
         <h1 className="text-sm font-semibold uppercase tracking-widest text-neutral-400">
           Session {day}
         </h1>
-        <span className="text-xs text-neutral-500">
-          {data ? `${data.polls.length} polls` : "…"}
-          {asOf && ` · last ${asOf} ET`}
+        <span className="flex items-center gap-1 text-xs">
+          {INSTRUMENTS.map((k) => (
+            <button
+              key={k}
+              type="button"
+              onClick={() => setInstrument(k)}
+              className={`rounded px-2 py-1 transition-colors ${
+                instrument === k
+                  ? "bg-neutral-700 text-neutral-100"
+                  : "text-neutral-500 hover:bg-neutral-800"
+              }`}
+            >
+              {INSTRUMENT_LABEL[k]}
+            </button>
+          ))}
+          <span className="ml-3 text-neutral-500">
+            {data ? `${data.polls.length} polls` : "…"}
+            {asOf && ` · last ${asOf} ET`}
+            {divisor !== 1 && " · strikes in SPY"}
+          </span>
         </span>
       </div>
 
@@ -91,7 +121,7 @@ export default function Session() {
 
       {data && data.polls.length === 0 && (
         <p className="rounded border border-neutral-800 bg-neutral-900/40 p-6 text-center text-sm text-neutral-500">
-          No polls stored for {day}.
+          No {INSTRUMENT_LABEL[instrument]} polls stored for {day}.
         </p>
       )}
 
@@ -139,7 +169,10 @@ export default function Session() {
   );
 }
 
-function buildOption(d: Data) {
+function buildOption(d: Data, divisor: number) {
+  // §10.1 never mixes: the price panel and the heatmap rows are the only
+  // strike-bearing axes here, and both take the same divisor.
+  const sc = (v: number | null) => (v === null || v === undefined ? null : v / divisor);
   const minutes = d.polls.map((p) => p.minute_of_day);
   const cat = minutes.map(hhmm);
   const idx = new Map(minutes.map((m, i) => [m, i]));
@@ -254,13 +287,13 @@ function buildOption(d: Data) {
     line("OI net", series((p) => p.oi_net), C.oi, 0, 0),
     line("flow net", series((p) => p.flow_net), C.flow, 0, 0),
     // 3.2 level drift vs spot
-    line("spot", series((p) => p.spot), C.spot, 1, 1,
+    line("spot", series((p) => sc(p.spot)), C.spot, 1, 1,
          { lineStyle: { color: C.spot, width: 2 }, markLine: markLineFor(false) }),
-    line("flip", series((p) => p.flip), C.flip, 1, 1,
+    line("flip", series((p) => sc(p.flip)), C.flip, 1, 1,
          { lineStyle: { color: C.flip, width: 1, type: "dashed" } }),
-    line("put wall", series((p) => p.put_wall), C.putWall, 1, 1,
+    line("put wall", series((p) => sc(p.put_wall)), C.putWall, 1, 1,
          { step: "end" as const }),
-    line("call wall", series((p) => p.call_wall), C.callWall, 1, 1,
+    line("call wall", series((p) => sc(p.call_wall)), C.callWall, 1, 1,
          { step: "end" as const }),
     // 3.3 premium drift by side — four series, never two
     line("calls bought", prem((p) => p.call_bought), C.callBought, 2, 2,
@@ -277,7 +310,7 @@ function buildOption(d: Data) {
     { name: "strike gamma", type: "heatmap" as const, xAxisIndex: 3, yAxisIndex: 4,
       data: heatCells, progressive: 4000, emphasis: { disabled: true } },
     // the one permitted dual axis, labelled as context
-    line("spot (context)", series((p) => p.spot), "#8f8f9f", 2, 3,
+    line("spot (context)", series((p) => sc(p.spot)), "#8f8f9f", 2, 3,
          { lineStyle: { color: "#8f8f9f", width: 1, opacity: 0.7, type: "dotted" } }),
   ];
 
@@ -320,7 +353,8 @@ function buildOption(d: Data) {
       { ...yAxisBase, gridIndex: 2, position: "right" as const, scale: true,
         splitLine: { show: false },
         axisLabel: { ...yAxisBase.axisLabel, formatter: (v: number) => price(v) } },
-      { type: "category" as const, gridIndex: 3, data: d.heat.strikes.map((s) => price(s)),
+      { type: "category" as const, gridIndex: 3,
+        data: d.heat.strikes.map((s) => price(s / divisor, divisor === 1 ? 0 : 2)),
         axisLabel: { color: C.axis, fontSize: 8, interval: Math.max(0, Math.floor(d.heat.strikes.length / 12)) },
         splitLine: { show: false } },
     ],

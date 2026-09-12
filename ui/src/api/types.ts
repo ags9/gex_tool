@@ -34,6 +34,8 @@ export interface Strike {
   flow_gex: number | null;
   /** From levels.level_label, server-side. Never derived here (spec §0). */
   label: "SUPPORT" | "RESISTANCE" | "TRAPDOOR" | "LAUNCHPAD";
+  /** Unsigned day volume. Activity, not positioning. null = not recorded. */
+  volume: number | null;
 }
 
 export interface ShadowTrade {

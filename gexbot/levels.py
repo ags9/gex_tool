@@ -73,6 +73,7 @@ def build_profile(contracts: list[dict], spot: float, *,
 
     by_strike: dict[float, float] = defaultdict(float)
     oi_by_strike: dict[float, float] = defaultdict(float)
+    vol_by_strike: dict[float, float] = defaultdict(float)
     total_oi = 0
 
     for c in contracts:
@@ -100,6 +101,10 @@ def build_profile(contracts: list[dict], spot: float, *,
             signed = -gex
         by_strike[float(strike)] += signed
         oi_by_strike[float(strike)] += oi
+        # Day volume is ACTIVITY, not positioning: unsigned contracts traded,
+        # with no view on who initiated. Kept separate from gamma for that
+        # reason and labelled as such wherever it is shown.
+        vol_by_strike[float(strike)] += float((c.get("day") or {}).get("volume") or 0)
         total_oi += oi
 
     strikes = sorted(by_strike)
@@ -129,6 +134,7 @@ def build_profile(contracts: list[dict], spot: float, *,
         "net": net,
         "flip": flip,
         "by_strike": by_strike,
+        "volume_by_strike": dict(vol_by_strike),
         "total_oi": total_oi,
         "expiries": sorted(keep_exp),
         "max_magnet": max(pos, key=pos.get) if pos else None,
