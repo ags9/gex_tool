@@ -55,7 +55,7 @@ forms."*
 ### What is nonetheless solid
 
 A pipeline that survives 7-billion-row days; ledgers, greeks, entry/exit/
-discipline engines (62 tests passing *(verify)*); honest REST NBBO marks
+discipline engines (93 tests passing *(verify)*); honest REST NBBO marks
 with provenance tracking; a backtest runner with era splits and executable
 gates; a four-arm control harness; put-call-parity spot reconstruction for
 pre-2023; Discord alerting; a results explorer. None of this is invalidated
@@ -202,7 +202,11 @@ and **starts a fresh holdout**. Never edit `PREREGISTRATION.md` in place.
     backoff; reports staleness so consumers halt on their own terms rather
     than trusting silent data.
 13. The dashboard is **read-only**. The only control it exposes is HALT. No
-    entries, no parameter edits, no re-arm from the UI.
+    entries, no parameter edits, no re-arm from the UI. The Phase-2 API has
+    **no write path at all** — not even HALT yet — and serves GET only.
+    `BundleReader` reads finished backtests and cannot run one: putting a
+    strategy evaluation behind a URL is the casual re-running the
+    pre-registration exists to prevent.
 14. **Localhost only** (127.0.0.1). This box holds brokerage credentials. If
     remote viewing is wanted: Tailscale or SSH tunnel, never a port-forward.
 15. One source of truth: the dashboard reads the same state store the
@@ -231,6 +235,7 @@ All commands: `python -m gexbot <cmd>`. Dates are ISO (`2024-01-02`).
 | `levels` | `--underlying` (I:SPX), `--model {naive,short_all}`, `--expiries` (2), `--window` (0.06), `--per-1pct` | Print today's GEX map from a live chain snapshot. |
 | `watch` | `--underlying`, `--interval` (180s), `--expiries`, `--window`, `--tranche`, `--no-shadow`, `--once` | Market-hours structural alerts + shadow trade narration to Discord. REST snapshots, not the live engine. |
 | `explore` | — | Streamlit results explorer on `GEX_DASHBOARD_PORT`, bound 127.0.0.1. |
+| `api` | `--port` (8742) | Read-only state API + `/ws/live`. Binds 127.0.0.1 with no host flag — there is deliberately no way to expose it. |
 | `discord-test` | — | Send one test message to each configured webhook. |
 
 **Undocumented env switch:** `GEX_BREAKOUT_ONLY=1` forces breakout-only mode
@@ -282,6 +287,12 @@ gexbot/
   notify.py       Discord, 3 tiers, fire-and-forget, drop-oldest.
   watch.py        Market-hours monitor + shadow narration.
   explore.py      Streamlit results explorer. Read-only by design.
+  state.py        Durable record of every poll/alert/shadow trade (DuckDB).
+                  Writers only; connect-per-operation; every write swallows
+                  and counts its own failures so the engine never dies of a
+                  storage problem. THE connection helper lives here.
+  api/reader.py   Read-only queries over that store + backtest bundles.
+  api/app.py      FastAPI: /api/* REST and /ws/live. No write path anywhere.
 ```
 
 **Key defaults** (`SimConfig` / `EntryParams` / `CParams` / `CostParams` /
@@ -298,7 +309,7 @@ flat 15:50, max 3 trades/day (5 on range days), 2 losing trades ends the day,
 ```bash
 uv venv && source .venv/bin/activate && uv pip install -e ".[dev]"
 cp .env.example .env          # fill Massive keys + GEX_DATA_ROOT
-python -m pytest -q           # 62 passing
+python -m pytest -q           # 93 passing
 ruff check .                  # line-length 100
 ```
 
@@ -340,6 +351,27 @@ live), ports 8741/8742. **Never commit `.env`; never send creds anywhere.**
   `{"gate_params": {...}, "gates": {...}}` instead of being a flat map of
   gates. `explore.py` reads both, so older bundles in `data/results` still
   render; anything else that parses a bundle needs the same treatment.
+- **The live flow overlay never reaches the profile.** `watch.py` calls
+  `levels.build_profile` and never `livefeed.combine`, so the map it alerts
+  on — and now records — is **OI-only**, even when the WebSocket feed is
+  running and the `FlowLedger` is filling up. Confirmed in the first live
+  poll: `oi_net` and `flow_net` are NULL and every `poll_strike.flow_gex` is
+  NULL. This matters more than it looks: `livefeed.py` exists precisely
+  because OI publishes pre-market and is structurally blind to 0DTE, which
+  is roughly half of SPX volume. Until `combine` is wired in, the intraday
+  edge the whole module was built for is computed and then discarded.
+  `state.write_poll` already reads optional `oi_by_strike` / `flow_by_strike`
+  keys, so the store needs no change when it is connected — but `combine()`
+  does not currently expose that per-strike split, only the merged total.
+- **DuckDB allows one writing process OR many readers, never both.** Measured
+  here, not assumed: a held read-only handle blocks the engine's writes and
+  vice versa, across processes, and mixing read-only with read-write inside
+  *one* process fails outright regardless of timing. Engine and API therefore
+  connect-per-operation and both retry through `state.connect`, with
+  deliberately asymmetric patience (engine ~10s, API ~1.5s) because under a
+  busy dashboard the writer is the one that loses. Any new reader must go
+  through `state.connect(..., read_only=True)`; a plain `duckdb.connect` will
+  eventually take the engine down.
 - `replay.py` still has a dead placeholder branch in the OI-loading path
   (a `type(led).load_oi.__self__ if False else None` no-op, immediately
   followed by `led.strikes.clear()` and a real bulk load).

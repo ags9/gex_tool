@@ -30,6 +30,7 @@ from rich.console import Console
 from .config import settings
 from .levels import BASE, build_profile, fetch_chain, fetch_index_spot
 from .notify import Channel, Color, DiscordNotifier
+from .state import StateStore, default_path
 
 console = Console()
 
@@ -37,6 +38,44 @@ SESSION_OPEN = 9 * 60 + 30
 SESSION_CLOSE = 16 * 60
 SHADOW_TAG = "📄 SHADOW"
 DISCLAIMER = "_strategy failed validation — narration only, not advice_"
+
+
+# ── alert sink ───────────────────────────────────────────────────────
+class AlertSink:
+    """Sends to Discord and records to the state store in one call.
+
+    Spec §3.2 requires that the notifier and the store never disagree. The
+    only way to guarantee that is to remove the opportunity: there is no path
+    in this module that reaches `DiscordNotifier.send` directly, so an alert
+    cannot be delivered without also being recorded, or recorded without
+    being delivered.
+
+    `kind` is keyword-only and required so every call site has to classify
+    its message. A default would quietly file half the history under
+    "warning" and make the table unqueryable.
+    """
+
+    def __init__(self, notifier: DiscordNotifier, store: StateStore):
+        self.n = notifier
+        self.store = store
+        self.poll_id: int | None = None        # set by the loop each poll
+
+    def send(self, channel: Channel, title: str, body: str,
+             color: int = Color.BLUE, fields=None, *, kind: str,
+             spot: float | None = None, strike: float | None = None) -> None:
+        self.n.send(channel, title, body, color, fields)
+        self.store.write_alert(channel=channel.value, kind=kind, title=title,
+                               body=body, poll_id=self.poll_id, spot=spot,
+                               strike=strike)
+
+    def daily_digest(self, *, body: str, green_day: bool) -> None:
+        self.n.daily_digest(body=body, green_day=green_day)
+        self.store.write_alert(channel=Channel.DAILY.value, kind="digest",
+                               title="Daily digest", body=body,
+                               poll_id=self.poll_id)
+
+    def flush(self, timeout: float = 15.0) -> None:
+        self.n.flush(timeout)
 
 
 # ── state ────────────────────────────────────────────────────────────
@@ -216,7 +255,7 @@ def position_footer(prof: dict, st: "WatchState") -> str:
     return f"\n\n**📄 Shadow position:** flat — {why}{done}"
 
 
-def post_map(n: DiscordNotifier, prof: dict) -> None:
+def post_map(n: AlertSink, prof: dict) -> None:
     """First poll of the session: today's structure, one card."""
     spot, net, flip = prof["spot"], prof["net"], prof.get("flip")
     rows = sorted(prof["by_strike"].items(), key=lambda kv: -abs(kv[1]))[:6]
@@ -229,10 +268,10 @@ def post_map(n: DiscordNotifier, prof: dict) -> None:
 + _level_lines(prof) +
            "Largest gamma strikes:\n" + "\n".join(lines) + "\n\n"
            + regime_context(net),
-           Color.BLUE)
+           Color.BLUE, kind="map", spot=spot)
 
 
-def structural_alerts(n: DiscordNotifier, prof: dict, st: WatchState) -> None:
+def structural_alerts(n: AlertSink, prof: dict, st: WatchState) -> None:
     spot, net, flip = prof["spot"], prof["net"], prof.get("flip")
 
     # regime flip
@@ -241,7 +280,8 @@ def structural_alerts(n: DiscordNotifier, prof: dict, st: WatchState) -> None:
         n.send(Channel.ALERTS, f"Regime flip → {regime} gamma",
                f"Net GEX {fmt_m(net)} (was {st.last_regime}).\n{regime_context(net)}",
                Color.AMBER,
-               [("spot", f"{spot:,.0f}"), ("flip", f"{flip:,.0f}" if flip else "—")])
+               [("spot", f"{spot:,.0f}"), ("flip", f"{flip:,.0f}" if flip else "—")],
+               kind="regime_flip", spot=spot)
     st.last_regime = regime
 
     # flip crossing — needs distance (hysteresis), persistence, and a cooldown.
@@ -266,7 +306,8 @@ def structural_alerts(n: DiscordNotifier, prof: dict, st: WatchState) -> None:
                            f"Spot {spot:,.0f} vs flip {flip:,.0f} "
                            f"({abs(spot-flip)/flip*100:.2f}% {side}).\n"
                            f"{flip_context(side)}"
-                           + position_footer(prof, st), Color.AMBER)
+                           + position_footer(prof, st), Color.AMBER,
+                           kind="flip_cross", spot=spot, strike=flip)
                     st.last_flip_alert_ts = time.time()
                 st.last_side_of_flip = side
                 st.pending_flip_side, st.pending_flip_count = "", 0
@@ -309,7 +350,7 @@ def structural_alerts(n: DiscordNotifier, prof: dict, st: WatchState) -> None:
                    f"Strike gamma {fmt_m(gv)}  ·  {', '.join(role_list)}.\n"
                    f"{local}{mismatch}"
                    + position_footer(prof, st),
-                   Color.BLUE)
+                   Color.BLUE, kind="proximity", spot=spot, strike=k)
             st.alerted_levels[key] = "near"
         elif dist > 0.004:
             st.alerted_levels.pop(key, None)
@@ -362,8 +403,9 @@ def shadow_logic(prof: dict, st: WatchState, key: str,
     return None
 
 
-def do_shadow(n: DiscordNotifier, prof: dict, st: WatchState, key: str,
-              underlying: str, tranche: float) -> None:
+def do_shadow(n: AlertSink, prof: dict, st: WatchState, key: str,
+              underlying: str, tranche: float,
+              store: StateStore | None = None) -> None:
     act = shadow_logic(prof, st, key, underlying)
     if not act:
         return
@@ -385,6 +427,13 @@ def do_shadow(n: DiscordNotifier, prof: dict, st: WatchState, key: str,
             direction=direction, strike=strike, expiry=expiry.isoformat(),
             entry_spot=spot, entry_premium=mid, contracts=contracts,
             trigger=p["trigger"], level=p["level"], peak_spot=spot))
+        # carried in the JSON state so the exit can find its row after a
+        # restart; None means the open write failed and the exit says so
+        # rather than guessing at which row to close.
+        st.open_trade["trade_id"] = store.open_shadow_trade(
+            direction=direction, strike=strike, expiry=expiry,
+            contracts=contracts, trigger=p["trigger"], level=p["level"],
+            entry_spot=spot, entry_premium=mid) if store else None
         n.send(Channel.TRADES,
                f"{SHADOW_TAG} would BUY SPX {strike:,.0f}{'C' if direction>0 else 'P'} "
                f"exp {expiry:%-m/%-d/%Y}",
@@ -392,12 +441,16 @@ def do_shadow(n: DiscordNotifier, prof: dict, st: WatchState, key: str,
                f"**Contracts:** {contracts} @ ~${mid:.2f} (spread ${spread:.2f})\n"
                f"**Spot:** {spot:,.0f}  ·  **Net GEX:** {fmt_m(prof['net'])}\n"
                f"{regime_context(prof['net'])}\n\n{DISCLAIMER}",
-               Color.BLUE)
+               Color.BLUE, kind="shadow_entry", spot=spot, strike=strike)
     else:
         t = st.open_trade
         st.shadow_pnl += p["pnl"]
         t.update(closed_at=dt.datetime.now().isoformat(timespec="minutes"),
                  exit_premium=p["mid"], exit_reason=p["reason"], pnl=p["pnl"])
+        if store:
+            store.close_shadow_trade(t.get("trade_id"), exit_spot=spot,
+                                     exit_premium=p["mid"],
+                                     exit_reason=p["reason"], pnl=p["pnl"])
         st.closed_trades.append(t)
         st.open_trade = None
         n.send(Channel.TRADES,
@@ -407,24 +460,28 @@ def do_shadow(n: DiscordNotifier, prof: dict, st: WatchState, key: str,
                f"${p['mid']:.2f} × {t['contracts']})\n"
                f"**Spot:** {t['entry_spot']:,.0f} → {spot:,.0f}\n"
                f"**Shadow P&L today:** ${st.shadow_pnl:+,.0f}\n\n{DISCLAIMER}",
-               Color.GREEN if p["pnl"] >= 0 else Color.RED)
+               Color.GREEN if p["pnl"] >= 0 else Color.RED,
+               kind="shadow_exit", spot=spot, strike=t["strike"])
 
 
 # ── main loop ────────────────────────────────────────────────────────
 def run_watch(*, underlying: str = "I:SPX", interval: int = 180,
               expiries: int = 2, window: float = 0.06,
               tranche: float = 3000.0, shadow: bool = True,
-              once: bool = False) -> None:
+              once: bool = False, state_db: Path | None = None) -> None:
     key = os.getenv("MASSIVE_API_KEY", "")
     if not key or key == "your_key_here":
         console.print("[red]MASSIVE_API_KEY not set")
         return
 
-    n = DiscordNotifier({
+    notifier = DiscordNotifier({
         Channel.TRADES: os.getenv("DISCORD_WEBHOOK_TRADES", ""),
         Channel.ALERTS: os.getenv("DISCORD_WEBHOOK_ALERTS", ""),
         Channel.DAILY: os.getenv("DISCORD_WEBHOOK_DAILY", ""),
     }, paper_mode=False)          # shadow tagging is explicit in the text
+
+    store = StateStore(state_db or default_path())
+    n = AlertSink(notifier, store)
 
     state_path = Path(settings.gex_data_root) / "watch_state.json"
     st = WatchState.load(state_path)
@@ -434,12 +491,16 @@ def run_watch(*, underlying: str = "I:SPX", interval: int = 180,
 
     console.print(f"[bold]watch started[/bold] · interval {interval}s · "
                   f"shadow {'on' if shadow else 'off'} · state {state_path}")
+    console.print(f"[bold]state store[/bold] · {store.path}"
+                  + ("" if store.available else " [red](unavailable — "
+                     "polls will not be recorded; alerting is unaffected)"))
 
     while True:
         m = minute_now()
         if not once and not (SESSION_OPEN - 30 <= m <= SESSION_CLOSE + 5):
             time.sleep(60)
             continue
+        t0 = time.monotonic()
         try:
             spot = fetch_index_spot(underlying, key)
             exp_cap = (dt.date.today() + dt.timedelta(days=14)).isoformat()
@@ -453,12 +514,17 @@ def run_watch(*, underlying: str = "I:SPX", interval: int = 180,
             if prof:
                 console.log(f"spot {prof['spot']:,.0f} net {fmt_m(prof['net'])} "
                             f"flip {prof.get('flip') or float('nan'):,.0f}")
+                # record the poll BEFORE any alert fires, so every alert this
+                # poll produces can point at the map that produced it
+                n.poll_id = store.write_poll(
+                    prof, poll_ms=int((time.monotonic() - t0) * 1000),
+                    model="naive", per_point=True)
                 if not st.posted_open_map:
                     post_map(n, prof)
                     st.posted_open_map = True
                 structural_alerts(n, prof, st)
                 if shadow:
-                    do_shadow(n, prof, st, key, underlying, tranche)
+                    do_shadow(n, prof, st, key, underlying, tranche, store)
                 st.save(state_path)
         except Exception as e:                       # never die on a poll
             console.log(f"[red]poll error: {e}")

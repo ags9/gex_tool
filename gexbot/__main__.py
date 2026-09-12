@@ -77,6 +77,10 @@ def main() -> None:
 
     sub.add_parser("explore", help="launch the results explorer UI (Streamlit, localhost)")
 
+    ap = sub.add_parser("api", help="serve the read-only state API (localhost only)")
+    ap.add_argument("--port", type=int, default=settings.gex_api_port,
+                    help="default %(default)s (GEX_API_PORT)")
+
     wt = sub.add_parser("watch", help="market-hours structural alerts + shadow trade narration")
     wt.add_argument("--underlying", default="I:SPX")
     wt.add_argument("--interval", type=int, default=180, help="seconds between polls")
@@ -178,6 +182,9 @@ def main() -> None:
                         "--server.port", str(settings.gex_dashboard_port),
                         "--server.address", "127.0.0.1",
                         "--browser.gatherUsageStats", "false"])
+    elif args.cmd == "api":
+        from .api import run_api
+        run_api(port=args.port)
     elif args.cmd == "index-rest":
         from dotenv import load_dotenv  # type: ignore
         load_dotenv()
