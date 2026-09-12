@@ -26,6 +26,17 @@ the answer is no — that goes through `PREREGISTRATION.md`.
 
 ---
 
+## 0.1 Scope for v1
+
+- **Paper only.** No real money. The bot evaluates against live market data
+  and records what it would do; orders are simulated. Real execution is a
+  later decision, made from the shadow record (§3), not assumed.
+- **SPX and XSP.** XSP matters here: at 1/10th the size, a 3-contract
+  position is affordable at this capital, which is what makes scaling out
+  possible at all. Its thinner book is a real cost — see §2.6.
+- **No UI overhaul.** The only new surface is the chain view (§4). The
+  existing screens stay as they are.
+
 ## 1. Workflow
 
 1. **Morning, at the desk.** Operator opens the chain view, sees today's GEX
@@ -67,6 +78,46 @@ Close unconditionally at ⚙15:50 ET. He exits same-day regardless; this makes
 that true even when he is unreachable. Overnight exposure on a position
 entered as an intraday trade is a different trade.
 
+### 2.5 Multi-contract ladder
+
+With more than one contract, exits happen in tranches rather than all at
+once. The operator exits all-at-once by hand and reports regretting it —
+"I should have stayed in at least one." That regret is directional, and the
+ladder addresses it. The runner is also the piece he cannot manage manually,
+because by then he is in a meeting.
+
+**This is a recommendation, not an evidenced conclusion.** It has not been
+backtested. §3 tests it.
+
+On ⚙3 contracts:
+
+| Tranche | Closes on | Notes |
+|---|---|---|
+| 2 contracts | level target (§2.1) | the exit he would have taken anyway |
+| 1 runner | trailing stop, next level beyond the target, or hard flat | stop moves to entry price the moment the first tranche fills |
+
+- **Weighting is deliberate.** His demonstrated edge is the quick move to
+  the level; continuation beyond it is speculation with no evidence behind
+  it. Weight the position toward the part that works.
+- **Runner stop at entry.** Once the first tranche fills, the trade cannot
+  become a loser. This costs some runners to noise; that is the trade.
+- **Time stop (§2.2) applies to the initial position only.** A runner has
+  already proven itself by reaching the target and gets more rope.
+- **Hard flat (§2.3) applies to everything**, runner included.
+- **1 contract → no ladder.** Falls back to the single-exit rules.
+- ⚙ Generalise as `ceil(n * 2/3)` at target, remainder as runner.
+
+Post-PDT, re-entry is unrestricted, so a runner's value is narrower than it
+first appears — it matters mainly when the operator cannot re-enter because
+he is unavailable. Which is the situation this whole system exists for.
+
+### 2.6 Crossing the spread more than once
+
+Scaling out crosses the bid/ask on each tranche instead of once. On XSP,
+whose book is thinner than SPX's, that cost is not trivial. Record the
+spread paid per tranche so §3 can weigh the ladder against all-at-once
+honestly rather than on the P&L headline alone.
+
 ### 2.4 Disaster backstop
 A resting stop order at the broker, set **wide** (⚙ −50% of premium), placed
 on entry and cancelled on normal exit.
@@ -91,6 +142,16 @@ Before the bot is allowed to close anything, it runs in shadow for ⚙3 weeks.
   resulted.
 - Discord and the UI show both: his actual exit, and the bot's counterfactual.
 
+The shadow record carries **three** outcomes per position, not two:
+
+1. what the operator actually did,
+2. what "close everything at the target" would have produced,
+3. what the §2.5 ladder would have produced.
+
+That is the only way to answer whether the ladder is an improvement or a
+preference. It costs nothing to record both policies and would be
+unrecoverable later.
+
 At the end, one question decided from the record and not from memory: **were
 the bot's exits better or worse than his?** Report win rate, average P&L,
 and — the number that matters most — what happened on days he was
@@ -106,8 +167,10 @@ No automatic promotion.
 
 Deliberately minimal. This is not a trading terminal.
 
-- **Chain view**: SPX, ATM ± ⚙5 strikes, ⚙3 DTE default, showing strike,
-  bid/ask, mid, and the GEX at that strike. Today's levels shown alongside.
+- **Chain view**: SPX **and XSP**, ATM ± ⚙5 strikes, ⚙3 DTE default,
+  showing strike, bid/ask, mid, spread width, and the GEX at that strike.
+  Today's levels shown alongside. XSP strikes display their SPX equivalent
+  so the two can be read in one frame.
 - **Order ticket**: contract, size, and the target level (pre-filled with
   the nearest significant level in that direction). Everything else is
   preset. One confirm.
