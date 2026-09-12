@@ -55,7 +55,7 @@ forms."*
 ### What is nonetheless solid
 
 A pipeline that survives 7-billion-row days; ledgers, greeks, entry/exit/
-discipline engines (122 tests passing *(verify)*); honest REST NBBO marks
+discipline engines (125 tests passing *(verify)*); honest REST NBBO marks
 with provenance tracking; a backtest runner with era splits and executable
 gates; a four-arm control harness; put-call-parity spot reconstruction for
 pre-2023; Discord alerting; a results explorer. None of this is invalidated
@@ -308,6 +308,9 @@ gexbot/
                   storage problem. THE connection helper lives here.
   api/reader.py   Read-only queries over that store + backtest bundles.
   api/app.py      FastAPI: /api/* REST and /ws/live. No write path anywhere.
+                  Serves level labels, the regime call and the position
+                  footer computed by the ENGINE's own functions — the UI is
+                  forbidden from re-deriving any of them (spec §0).
 
 ui/               Vite + React + TS operator dashboard (Phase 3). Read-only.
   src/api/client.ts   parseUtc() — the API sends NAIVE UTC; new Date() would
@@ -332,7 +335,7 @@ flat 15:50, max 3 trades/day (5 on range days), 2 losing trades ends the day,
 ```bash
 uv venv && source .venv/bin/activate && uv pip install -e ".[dev]"
 cp .env.example .env          # fill Massive keys + GEX_DATA_ROOT
-python -m pytest -q           # 122 passing
+python -m pytest -q           # 125 passing
 ruff check .                  # line-length 100
 ```
 
@@ -349,10 +352,15 @@ live), ports 8741/8742. **Never commit `.env`; never send creds anywhere.**
 
 **Open**
 
-- **Phase 3 UI is at build step 1 of 5** (`docs/PHASE3_UI_SPEC.md` §7):
-  scaffold, API client, WS hook, health strip. The `App.tsx` "live wire"
-  panel is scaffolding to prove the socket and is replaced by the strike
-  profile in step 2, not kept.
+- **Phase 3 UI is at build step 2 of 5** (`docs/PHASE3_UI_SPEC.md` §7):
+  Screen 1 (strike profile + right rail) is built. Steps 3-5 — `poll_premium`,
+  Screen 2, Screen 3 — are not.
+- **`docs/PHASE3_UI_SPEC.md` has no §10.** The `underlying` column was built
+  from a one-line instruction, not a written spec; the design choices are in
+  the commit message and may need correcting.
+- **The `volume` source toggle is inert**, and shown disabled with a reason.
+  Per-strike day volume is not stored anywhere, and spec §0 forbids showing a
+  number we cannot source. It needs a store column before it can work.
 - **Port 8741 is contested.** `explore.py` (Streamlit) and the new UI both
   want `GEX_DASHBOARD_PORT`. Until `explore.py` is retired (step 5), run the
   dev server with `GEX_DASHBOARD_PORT=8743`.

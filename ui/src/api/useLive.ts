@@ -1,13 +1,13 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { api } from "./client";
-import type { Alert, Health, LatestPoll, LiveMessage, Poll, ShadowTrade, Strike } from "./types";
+import type { Alert, Health, LatestPoll, LiveMessage, ShadowTrade } from "./types";
 
 export type ConnState = "connecting" | "live" | "reconnecting" | "off";
 
 export interface LiveState {
   conn: ConnState;
-  poll: (Poll & { strikes: Strike[] }) | null;
+  poll: LatestPoll | null;
   position: ShadowTrade | null;
   health: Health | null;
   alerts: Alert[];
@@ -44,16 +44,22 @@ export function useLive(): LiveState {
     error: null,
   });
 
-  const wsRef = useRef<WebSocket | null>(null);
-  const attemptRef = useRef(0);
-  const timerRef = useRef<number | null>(null);
-  const closedRef = useRef(false);
-
   useEffect(() => {
-    closedRef.current = false;
+    // Everything below is effect-LOCAL, not refs. React StrictMode mounts
+    // effects twice in dev, and with shared refs the first invocation's
+    // teardown raced the second's setup: the dying socket's onclose saw a
+    // freshly-reset "not closed" flag and scheduled its own reconnect. That
+    // left orphaned sockets accumulating — 4 for one tab, measured — each
+    // polling DuckDB once a second against the engine's write lock, and
+    // each incrementing the same counters, so one poll registered as two.
+    // Effect-local closures make every invocation independently cancellable.
+    let cancelled = false;
+    let socket: WebSocket | null = null;
+    let timer: number | null = null;
+    let attempt = 0;
 
-    // seed from REST so the first paint is truthful even before the socket
-    // opens — and so a socket that never opens still shows real numbers
+    // Seed from REST so the first paint is truthful before the socket opens,
+    // and so a socket that never opens still shows real numbers.
     const ac = new AbortController();
     void (async () => {
       try {
@@ -61,7 +67,7 @@ export function useLive(): LiveState {
           api.latest(ac.signal).catch(() => null),
           api.health(ac.signal).catch(() => null),
         ]);
-        if (ac.signal.aborted) return;
+        if (cancelled) return;
         setState((s) =>
           s.poll
             ? s
@@ -78,17 +84,23 @@ export function useLive(): LiveState {
     })();
 
     const connect = () => {
-      if (closedRef.current) return;
+      if (cancelled) return;
       const proto = window.location.protocol === "https:" ? "wss" : "ws";
-      const ws = new WebSocket(`${proto}://${window.location.host}/ws/live`);
-      wsRef.current = ws;
+      const sock = new WebSocket(`${proto}://${window.location.host}/ws/live`);
+      socket = sock;
 
-      ws.onopen = () => {
-        attemptRef.current = 0;
+      // `socket !== sock` means this handler belongs to a superseded
+      // connection; it must not touch state or schedule anything.
+      const stale = () => cancelled || socket !== sock;
+
+      sock.onopen = () => {
+        if (stale()) return;
+        attempt = 0;
         setState((s) => ({ ...s, conn: "live", error: null }));
       };
 
-      ws.onmessage = (ev) => {
+      sock.onmessage = (ev) => {
+        if (stale()) return;
         let msg: LiveMessage;
         try {
           msg = JSON.parse(ev.data as string) as LiveMessage;
@@ -98,26 +110,29 @@ export function useLive(): LiveState {
         setState((s) => apply(s, msg));
       };
 
-      ws.onerror = () => {
+      sock.onerror = () => {
+        if (stale()) return;
         setState((s) => ({ ...s, error: "websocket error" }));
       };
 
-      ws.onclose = () => {
-        if (closedRef.current) return;
+      sock.onclose = () => {
+        if (stale()) return;
         setState((s) => ({ ...s, conn: "reconnecting" }));
-        const delay = Math.min(500 * 2 ** attemptRef.current, MAX_BACKOFF_MS);
-        attemptRef.current += 1;
-        timerRef.current = window.setTimeout(connect, delay);
+        const delay = Math.min(500 * 2 ** attempt, MAX_BACKOFF_MS);
+        attempt += 1;
+        timer = window.setTimeout(connect, delay);
       };
     };
 
     connect();
 
     return () => {
-      closedRef.current = true;
+      cancelled = true;
       ac.abort();
-      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
-      wsRef.current?.close();
+      if (timer !== null) window.clearTimeout(timer);
+      const dying = socket;
+      socket = null;            // any in-flight handler now reads as stale
+      dying?.close();
     };
   }, []);
 
@@ -137,6 +152,8 @@ function apply(s: LiveState, msg: LiveMessage): LiveState {
       };
     }
     case "poll":
+      // The push carries its own context, position and as_of — every number
+      // on screen then describes the same instant.
       return {
         ...s,
         lastMessageAt: now,

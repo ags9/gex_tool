@@ -82,9 +82,13 @@ def create_app(db_path=None, results_root=None) -> FastAPI:
         return await asyncio.to_thread(reader.health)
 
     # ── session ──────────────────────────────────────────────────────
+    @app.get("/api/underlyings")
+    async def underlyings():
+        return await asyncio.to_thread(reader.underlyings)
+
     @app.get("/api/session/latest")
-    async def session_latest():
-        poll = await asyncio.to_thread(reader.latest)
+    async def session_latest(underlying: str | None = Query(None)):
+        poll = await asyncio.to_thread(reader.latest, underlying)
         if poll is None:
             raise HTTPException(404, "no polls recorded yet")
         poll["as_of"] = poll["ts"]
@@ -93,10 +97,12 @@ def create_app(db_path=None, results_root=None) -> FastAPI:
     @app.get("/api/session/{date}/polls")
     async def session_polls(date: str,
                             from_minute: int | None = Query(None, ge=0, le=1440),
-                            to_minute: int | None = Query(None, ge=0, le=1440)):
+                            to_minute: int | None = Query(None, ge=0, le=1440),
+                            underlying: str | None = Query(None)):
         return await asyncio.to_thread(reader.polls, _date(date),
                                        from_minute=from_minute,
-                                       to_minute=to_minute)
+                                       to_minute=to_minute,
+                                       underlying=underlying)
 
     @app.get("/api/session/{date}/profile")
     async def session_profile(date: str,

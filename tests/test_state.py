@@ -326,3 +326,55 @@ def test_watch_once_writes_exactly_one_poll(tmp_path: Path, monkeypatch):
     alerts = _rows(s, "SELECT kind, poll_id FROM alert_log")
     assert alerts, "the opening map alert at minimum"
     assert all(a[1] == pid for a in alerts), "every alert links to its poll"
+
+
+# ── underlying column (schema change) ────────────────────────────────
+def test_underlying_defaults_and_round_trips(store: StateStore):
+    store.write_poll(PROFILE)                                  # default
+    store.write_poll(PROFILE, underlying="I:NDX")
+    store.write_alert(channel="alerts", kind="map", title="t", body="b",
+                      underlying="I:NDX")
+    store.open_shadow_trade(direction=1, strike=1.0,
+                            expiry=dt.date(2026, 9, 16), contracts=1,
+                            trigger="t", level=None, entry_spot=1.0,
+                            entry_premium=1.0, underlying="I:NDX")
+    assert _rows(store, "SELECT underlying, count(*) FROM poll_snapshot "
+                        "GROUP BY 1 ORDER BY 1") == [("I:NDX", 1), ("I:SPX", 1)]
+    assert _rows(store, "SELECT underlying FROM alert_log")[0][0] == "I:NDX"
+    assert _rows(store, "SELECT underlying FROM shadow_trade")[0][0] == "I:NDX"
+
+
+def test_migration_backfills_an_existing_store(tmp_path: Path):
+    """A store written before the column existed must migrate in place on the
+    next engine start — no dump and reload, and no window where the engine
+    cannot write. Backfilling to I:SPX states what actually happened: every
+    poll so far came from watch's default underlying."""
+    p = tmp_path / "old.duckdb"
+    with duckdb.connect(str(p)) as con:
+        con.execute("""CREATE TABLE poll_snapshot (
+            poll_id BIGINT PRIMARY KEY, ts TIMESTAMP NOT NULL,
+            session_date DATE NOT NULL, minute_of_day INTEGER NOT NULL,
+            spot DOUBLE NOT NULL, net_gex DOUBLE NOT NULL, oi_net DOUBLE,
+            flow_net DOUBLE, flip DOUBLE, put_wall DOUBLE, call_wall DOUBLE,
+            max_accel DOUBLE, max_magnet DOUBLE, first_pos_above DOUBLE,
+            expiries VARCHAR, model VARCHAR NOT NULL, per_point BOOLEAN NOT NULL,
+            feed_connected BOOLEAN, feed_trades BIGINT, feed_contracts BIGINT,
+            poll_ms INTEGER)""")
+        con.execute("INSERT INTO poll_snapshot (poll_id, ts, session_date, "
+                    "minute_of_day, spot, net_gex, model, per_point) "
+                    "VALUES (1, now(), DATE '2026-09-11', 660, 7600.0, -1.0, "
+                    "'naive', true)")
+
+    store = StateStore(p)                       # opening migrates
+    assert store.available
+    assert _rows(store, "SELECT underlying, spot FROM poll_snapshot") \
+        == [("I:SPX", 7600.0)], "existing row preserved and backfilled"
+    assert store.write_poll(PROFILE, underlying="I:NDX") is not None
+
+
+def test_poll_strike_has_no_underlying_of_its_own(store: StateStore):
+    """It reaches one through poll_id. Denormalising would repeat the string
+    across ~155 rows per poll and create a second place to disagree."""
+    store.write_poll(PROFILE)
+    cols = [r[1] for r in _rows(store, "PRAGMA table_info(poll_strike)")]
+    assert "underlying" not in cols

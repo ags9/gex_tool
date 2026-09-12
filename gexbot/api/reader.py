@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..clock import ET
@@ -26,6 +27,12 @@ SESSION_CLOSE = 16 * 60
 STALE_SECONDS = 300          # spec §4.3: >5 min without a poll in-hours = not ok
 
 
+def _underlying_clause(underlying: str | None) -> tuple[str, list]:
+    """Optional filter. None means every underlying, which is what a store
+    with only I:SPX in it should keep returning."""
+    return (" WHERE underlying = ?", [underlying]) if underlying else ("", [])
+
+
 def _connect(path: Path | str):
     """Read-only, and retrying: the engine holds the write lock for a few
     milliseconds per poll, and a read that lands inside that window must
@@ -37,6 +44,14 @@ def _dicts(con, sql: str, params: list | None = None) -> list[dict]:
     cur = con.execute(sql, params or [])
     cols = [d[0] for d in cur.description]
     return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+@dataclass
+class _FooterState:
+    """The slice of WatchState that position_footer actually reads."""
+    open_trade: dict | None = None
+    closed_trades: list = field(default_factory=list)
+    shadow_pnl: float = 0.0
 
 
 class StateReader:
@@ -101,20 +116,120 @@ class StateReader:
         return out
 
     # ── sessions ─────────────────────────────────────────────────────
-    def latest(self) -> dict | None:
+    def latest(self, underlying: str | None = None) -> dict | None:
         if not self.exists:
             return None
+        where, params = _underlying_clause(underlying)
         with _connect(self.path) as con:
-            polls = _dicts(con, "SELECT * FROM poll_snapshot "
-                                "ORDER BY poll_id DESC LIMIT 1")
+            polls = _dicts(con, f"SELECT * FROM poll_snapshot{where} "
+                                f"ORDER BY poll_id DESC LIMIT 1", params)
             if not polls:
                 return None
             poll = polls[0]
             poll["strikes"] = _dicts(
                 con, """SELECT strike, gex, oi_gex, flow_gex FROM poll_strike
                         WHERE poll_id=? ORDER BY strike""", [poll["poll_id"]])
+            self._label_strikes(poll["strikes"], poll["spot"])
             poll["position"] = self._open_position(con)
+            poll["context"] = self.context(poll, poll["strikes"], con)
         return poll
+
+    @staticmethod
+    def _label_strikes(strikes: list[dict], spot: float) -> None:
+        """Attach the sign-derived label to EVERY strike, in place.
+
+        The right rail names any strike it lists, not just the annotated
+        levels, and spec §0 forbids the UI deriving these itself — so the
+        authority (levels.level_label) is applied here once.
+        """
+        from ..levels import level_label
+        for s in strikes:
+            s["label"] = level_label(s["gex"], s["strike"] < spot)
+
+    def context(self, poll: dict, strikes: list[dict], con) -> dict:
+        """Labels, regime and position text — computed by the ENGINE's own
+        functions, never by the UI (spec §0, §2.3).
+
+        `levels.level_label`, `watch.regime_of` and `watch.position_footer`
+        are the single authorities for what a level is called, when a regime
+        is real, and what the shadow book is doing. A dashboard that
+        re-derives any of them will eventually disagree with the Discord
+        alert describing the same instant, and the operator will have no way
+        to know which is right.
+        """
+        from ..levels import level_label
+        from ..watch import position_footer, regime_context, regime_of
+
+        by_strike = {s["strike"]: s["gex"] for s in strikes}
+        spot = poll["spot"]
+
+        def annotate(kind: str, strike: float | None) -> dict | None:
+            if strike is None:
+                return None
+            gex = by_strike.get(strike, 0.0)
+            return {
+                "kind": kind,
+                "strike": strike,
+                "gex": gex,
+                "label": level_label(gex, strike < spot),
+                "distance_pts": strike - spot,
+                "distance_pct": (strike - spot) / spot if spot else 0.0,
+            }
+
+        levels = [
+            a for a in (
+                annotate("flip", poll.get("flip")),
+                annotate("put_wall", poll.get("put_wall")),
+                annotate("call_wall", poll.get("call_wall")),
+                annotate("max_accel", poll.get("max_accel")),
+                annotate("max_magnet", poll.get("max_magnet")),
+                annotate("first_pos_above", poll.get("first_pos_above")),
+            ) if a is not None
+        ]
+
+        # The dead zone scales with the session's own largest reading, so it
+        # has to be measured over the session, not this poll alone.
+        peak = con.execute(
+            "SELECT max(abs(net_gex)) FROM poll_snapshot WHERE session_date=? "
+            "AND underlying=?",
+            [poll["session_date"], poll.get("underlying")]).fetchone()[0] or 0.0
+        state = regime_of(poll["net_gex"], peak)
+        regime = {
+            "state": state or "NEUTRAL",
+            "called": bool(state),
+            "session_peak_abs_net": peak,
+            "description": (regime_context(poll["net_gex"]) if state else
+                            "Net gamma is inside the dead zone — too small to "
+                            "call a regime. This is the absence of a reading, "
+                            "not a third regime."),
+        }
+
+        # position_footer speaks WatchState; give it one built from the store
+        # rather than reading the engine's JSON, so the API stays read-only
+        # with respect to the engine's files.
+        trades = _dicts(con, "SELECT * FROM shadow_trade WHERE session_date=? "
+                             "AND underlying=?",
+                        [poll["session_date"], poll.get("underlying")])
+        closed = [t for t in trades if t["exit_ts"] is not None]
+        open_ = next((t for t in trades if t["exit_ts"] is None), None)
+        st = _FooterState(
+            open_trade=None if open_ is None else {
+                "contracts": open_["contracts"], "strike": open_["strike"],
+                "direction": open_["direction"], "expiry": str(open_["expiry"]),
+                "entry_premium": open_["entry_premium"],
+                "opened_at": str(open_["entry_ts"]),
+                "entry_spot": open_["entry_spot"], "level": open_["level"]},
+            closed_trades=closed,
+            shadow_pnl=sum(t["pnl"] or 0.0 for t in closed),
+        )
+        prof = {"spot": spot, "net": poll["net_gex"],
+                "put_wall": poll.get("put_wall"),
+                "call_wall": poll.get("call_wall")}
+        footer = position_footer(prof, st)          # type: ignore[arg-type]
+
+        return {"levels": levels, "regime": regime,
+                "position_text": footer.replace("**", "").strip(),
+                "position": open_}
 
     def _open_position(self, con) -> dict | None:
         rows = _dicts(con, """SELECT * FROM shadow_trade WHERE exit_ts IS NULL
@@ -122,7 +237,8 @@ class StateReader:
         return rows[0] if rows else None
 
     def polls(self, session_date: dt.date, *, from_minute: int | None = None,
-              to_minute: int | None = None) -> list[dict]:
+              to_minute: int | None = None,
+              underlying: str | None = None) -> list[dict]:
         """Snapshot rows without strike detail — the charting series."""
         if not self.exists:
             return []
@@ -134,6 +250,9 @@ class StateReader:
         if to_minute is not None:
             sql += " AND minute_of_day <= ?"
             params.append(to_minute)
+        if underlying:
+            sql += " AND underlying = ?"
+            params.append(underlying)
         with _connect(self.path) as con:
             return _dicts(con, sql + " ORDER BY poll_id", params)
 
@@ -160,6 +279,8 @@ class StateReader:
                 con, """SELECT strike, gex, oi_gex, flow_gex FROM poll_strike
                         WHERE poll_id=? ORDER BY strike""", [poll["poll_id"]])
             poll["requested_minute"] = minute
+            self._label_strikes(poll["strikes"], poll["spot"])
+            poll["context"] = self.context(poll, poll["strikes"], con)
         return poll
 
     def alerts(self, session_date: dt.date) -> list[dict]:
@@ -179,6 +300,14 @@ class StateReader:
         with _connect(self.path) as con:
             return _dicts(con, "SELECT * FROM shadow_trade WHERE session_date=? "
                                "ORDER BY trade_id", [session_date])
+
+    def underlyings(self) -> list[str]:
+        if not self.exists:
+            return []
+        with _connect(self.path) as con:
+            return [r[0] for r in con.execute(
+                "SELECT DISTINCT underlying FROM poll_snapshot "
+                "ORDER BY underlying").fetchall()]
 
     def sessions(self, limit: int = 30) -> list[dict]:
         if not self.exists:
@@ -251,6 +380,13 @@ class StateReader:
                 p["strikes"] = _dicts(
                     con, """SELECT strike, gex, oi_gex, flow_gex FROM poll_strike
                             WHERE poll_id=? ORDER BY strike""", [p["poll_id"]])
+                # A pushed poll is self-describing: carrying the previous
+                # poll's levels and regime alongside a new spot would put two
+                # different instants on one screen.
+                self._label_strikes(p["strikes"], p["spot"])
+                p["context"] = self.context(p, p["strikes"], con)
+                p["position"] = self._open_position(con)
+                p["as_of"] = p["ts"]
             alerts = _dicts(con, "SELECT * FROM alert_log WHERE alert_id > ? "
                                  "ORDER BY alert_id", [last_alert])
             trades = _dicts(con, "SELECT * FROM shadow_trade ORDER BY trade_id")

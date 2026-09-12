@@ -57,9 +57,11 @@ class AlertSink:
     "warning" and make the table unqueryable.
     """
 
-    def __init__(self, notifier: DiscordNotifier, store: StateStore):
+    def __init__(self, notifier: DiscordNotifier, store: StateStore,
+                 underlying: str = "I:SPX"):
         self.n = notifier
         self.store = store
+        self.underlying = underlying
         self.poll_id: int | None = None        # set by the loop each poll
 
     def send(self, channel: Channel, title: str, body: str,
@@ -68,13 +70,13 @@ class AlertSink:
         self.n.send(channel, title, body, color, fields)
         self.store.write_alert(channel=channel.value, kind=kind, title=title,
                                body=body, poll_id=self.poll_id, spot=spot,
-                               strike=strike)
+                               strike=strike, underlying=self.underlying)
 
     def daily_digest(self, *, body: str, green_day: bool) -> None:
         self.n.daily_digest(body=body, green_day=green_day)
         self.store.write_alert(channel=Channel.DAILY.value, kind="digest",
                                title="Daily digest", body=body,
-                               poll_id=self.poll_id)
+                               poll_id=self.poll_id, underlying=self.underlying)
 
     def flush(self, timeout: float = 15.0) -> None:
         self.n.flush(timeout)
@@ -512,7 +514,8 @@ def do_shadow(n: AlertSink, prof: dict, st: WatchState, key: str,
         st.open_trade["trade_id"] = store.open_shadow_trade(
             direction=direction, strike=strike, expiry=expiry,
             contracts=contracts, trigger=p["trigger"], level=p["level"],
-            entry_spot=spot, entry_premium=mid) if store else None
+            entry_spot=spot, entry_premium=mid,
+            underlying=underlying) if store else None
         n.send(Channel.TRADES,
                f"{SHADOW_TAG} would BUY SPX {strike:,.0f}{'C' if direction>0 else 'P'} "
                f"exp {expiry:%-m/%-d/%Y}",
@@ -561,7 +564,7 @@ def run_watch(*, underlying: str = "I:SPX", interval: int = 180,
     }, paper_mode=False)          # shadow tagging is explicit in the text
 
     store = StateStore(state_db or default_path())
-    n = AlertSink(notifier, store)
+    n = AlertSink(notifier, store, underlying)
 
     state_path = Path(settings.gex_data_root) / "watch_state.json"
     st = WatchState.load(state_path)
@@ -642,7 +645,7 @@ def run_watch(*, underlying: str = "I:SPX", interval: int = 180,
                                  "contracts": ledger.contracts_seen}
                                 if feed is not None else None),
                     poll_ms=int((time.monotonic() - t0) * 1000),
-                    model="naive", per_point=True)
+                    model="naive", per_point=True, underlying=underlying)
                 # Structural narration is silent outside 09:00-16:15 ET. The
                 # poll itself is still recorded — the history should not have
                 # holes just because nobody wanted a phone notification — and

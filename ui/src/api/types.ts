@@ -4,6 +4,7 @@
 
 export interface Poll {
   poll_id: number;
+  underlying: string;
   ts: string;                 // NAIVE UTC — see parseUtc()
   session_date: string;
   minute_of_day: number;
@@ -31,6 +32,8 @@ export interface Strike {
   gex: number;
   oi_gex: number | null;      // null = overlay off; 0 = measured as zero
   flow_gex: number | null;
+  /** From levels.level_label, server-side. Never derived here (spec §0). */
+  label: "SUPPORT" | "RESISTANCE" | "TRAPDOOR" | "LAUNCHPAD";
 }
 
 export interface ShadowTrade {
@@ -66,10 +69,44 @@ export interface Alert {
   strike: number | null;
 }
 
+/** A level annotated by the ENGINE. `label` comes from levels.level_label —
+ *  the UI must never derive it (spec §0). */
+export interface Level {
+  kind:
+    | "flip"
+    | "put_wall"
+    | "call_wall"
+    | "max_accel"
+    | "max_magnet"
+    | "first_pos_above";
+  strike: number;
+  gex: number;
+  label: "SUPPORT" | "RESISTANCE" | "TRAPDOOR" | "LAUNCHPAD";
+  distance_pts: number;
+  distance_pct: number;
+}
+
+export interface Regime {
+  state: "POSITIVE" | "NEGATIVE" | "NEUTRAL";
+  called: boolean;
+  session_peak_abs_net: number;
+  description: string;
+}
+
+/** Everything the right rail needs, computed server-side so the dashboard
+ *  cannot disagree with the Discord alert describing the same instant. */
+export interface PollContext {
+  levels: Level[];
+  regime: Regime;
+  position_text: string;
+  position: ShadowTrade | null;
+}
+
 /** /api/session/latest — a Poll plus its profile and any open position. */
 export interface LatestPoll extends Poll {
   strikes: Strike[];
   position: ShadowTrade | null;
+  context: PollContext;
   as_of: string;
 }
 
@@ -90,7 +127,7 @@ export interface Health {
 
 export type LiveMessage =
   | { type: "snapshot"; data: LatestPoll | null }
-  | { type: "poll"; data: Poll & { strikes: Strike[] } }
+  | { type: "poll"; data: LatestPoll }
   | { type: "alert"; data: Alert }
   | { type: "trade"; data: ShadowTrade }
   | { type: "health"; data: Health };

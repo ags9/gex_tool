@@ -79,6 +79,7 @@ def connect(path: str, *, read_only: bool = False, attempts: int | None = None):
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS poll_snapshot (
     poll_id          BIGINT PRIMARY KEY,
+    underlying       VARCHAR NOT NULL DEFAULT 'I:SPX',
     ts               TIMESTAMP NOT NULL,
     session_date     DATE NOT NULL,
     minute_of_day    INTEGER NOT NULL,
@@ -112,6 +113,7 @@ CREATE TABLE IF NOT EXISTS poll_strike (
 
 CREATE TABLE IF NOT EXISTS alert_log (
     alert_id         BIGINT PRIMARY KEY,
+    underlying       VARCHAR NOT NULL DEFAULT 'I:SPX',
     poll_id          BIGINT,
     ts               TIMESTAMP NOT NULL,
     channel          VARCHAR NOT NULL,
@@ -124,6 +126,7 @@ CREATE TABLE IF NOT EXISTS alert_log (
 
 CREATE TABLE IF NOT EXISTS shadow_trade (
     trade_id         BIGINT PRIMARY KEY,
+    underlying       VARCHAR NOT NULL DEFAULT 'I:SPX',
     session_date     DATE NOT NULL,
     direction        INTEGER NOT NULL,
     strike           DOUBLE NOT NULL,
@@ -143,6 +146,35 @@ CREATE TABLE IF NOT EXISTS shadow_trade (
     pnl              DOUBLE
 );
 """
+
+DEFAULT_UNDERLYING = "I:SPX"
+
+# Applied after SCHEMA on every open. DuckDB's ADD COLUMN IF NOT EXISTS is
+# idempotent and backfills existing rows with the default, so a store written
+# before this column existed migrates in place on the next engine start —
+# no dump-and-reload, and no window where the engine cannot write.
+#
+# The default is the honest value rather than a placeholder: every poll ever
+# recorded came from `watch --underlying I:SPX`, which is the CLI default, so
+# backfilling to I:SPX states what actually happened.
+MIGRATIONS = (
+    f"ALTER TABLE poll_snapshot ADD COLUMN IF NOT EXISTS underlying "
+    f"VARCHAR DEFAULT '{DEFAULT_UNDERLYING}'",
+    f"ALTER TABLE alert_log ADD COLUMN IF NOT EXISTS underlying "
+    f"VARCHAR DEFAULT '{DEFAULT_UNDERLYING}'",
+    f"ALTER TABLE shadow_trade ADD COLUMN IF NOT EXISTS underlying "
+    f"VARCHAR DEFAULT '{DEFAULT_UNDERLYING}'",
+    f"UPDATE poll_snapshot SET underlying = '{DEFAULT_UNDERLYING}' "
+    f"WHERE underlying IS NULL",
+    f"UPDATE alert_log SET underlying = '{DEFAULT_UNDERLYING}' "
+    f"WHERE underlying IS NULL",
+    f"UPDATE shadow_trade SET underlying = '{DEFAULT_UNDERLYING}' "
+    f"WHERE underlying IS NULL",
+)
+
+# poll_strike deliberately has NO underlying column: it reaches one through
+# poll_id. Denormalising it would repeat the same string across ~155 rows per
+# poll and create a second place for the two to disagree.
 
 # Alert kinds the engine may record (spec §2). Kept as a tuple so a typo at a
 # call site is caught here rather than becoming an unqueryable one-off value.
@@ -185,6 +217,8 @@ class StateStore:
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
             with connect(self.path) as con:
                 con.execute(SCHEMA)
+                for stmt in MIGRATIONS:
+                    con.execute(stmt)
             self.available = True
         except Exception as e:                       # degraded, not dead
             self._note(e, "schema")
@@ -209,7 +243,7 @@ class StateStore:
     # ── writers ──────────────────────────────────────────────────────
     def write_poll(self, profile: dict, feed_stats: dict | None = None,
                    poll_ms: int | None = None, *, model: str = "naive",
-                   per_point: bool = True,
+                   per_point: bool = True, underlying: str = DEFAULT_UNDERLYING,
                    ts: dt.datetime | None = None) -> int | None:
         """One `poll_snapshot` row plus its `poll_strike` profile.
 
@@ -239,10 +273,17 @@ class StateStore:
                 for k, v in by_strike.items()
             ]
             with connect(self.path) as con:
+                # named columns, not positional: a future migration appends
+                # to the table and would silently shift a positional INSERT
                 con.execute(
-                    """INSERT INTO poll_snapshot VALUES
-                       (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    [pid, ts.replace(tzinfo=None), session_date_of(ts),
+                    """INSERT INTO poll_snapshot
+                       (poll_id, underlying, ts, session_date, minute_of_day,
+                        spot, net_gex, oi_net, flow_net, flip, put_wall,
+                        call_wall, max_accel, max_magnet, first_pos_above,
+                        expiries, model, per_point, feed_connected,
+                        feed_trades, feed_contracts, poll_ms)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    [pid, underlying, ts.replace(tzinfo=None), session_date_of(ts),
                      minute_of(ts), float(profile["spot"]),
                      float(profile["net"]),
                      profile.get("oi_net"), profile.get("flow_net"),
@@ -265,6 +306,7 @@ class StateStore:
     def write_alert(self, *, channel: str, kind: str, title: str, body: str,
                     poll_id: int | None = None, spot: float | None = None,
                     strike: float | None = None,
+                    underlying: str = DEFAULT_UNDERLYING,
                     ts: dt.datetime | None = None) -> int | None:
         """Record an alert that was sent. Called from the same site as the
         Discord send so the channel and the store cannot disagree."""
@@ -278,9 +320,12 @@ class StateStore:
             aid = self._next_id("alert", ts)
             with connect(self.path) as con:
                 con.execute(
-                    "INSERT INTO alert_log VALUES (?,?,?,?,?,?,?,?,?)",
-                    [aid, poll_id, ts.replace(tzinfo=None), channel, kind,
-                     title, body, spot, strike])
+                    """INSERT INTO alert_log
+                       (alert_id, underlying, poll_id, ts, channel, kind,
+                        title, body, spot, strike)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    [aid, underlying, poll_id, ts.replace(tzinfo=None), channel,
+                     kind, title, body, spot, strike])
             return aid
         except Exception as e:
             self._note(e, "write_alert")
@@ -290,6 +335,7 @@ class StateStore:
                           expiry: dt.date, contracts: int, trigger: str,
                           level: float | None, entry_spot: float,
                           entry_premium: float,
+                          underlying: str = DEFAULT_UNDERLYING,
                           ts: dt.datetime | None = None) -> int | None:
         if not self.available:
             return None
@@ -299,11 +345,11 @@ class StateStore:
             with connect(self.path) as con:
                 con.execute(
                     """INSERT INTO shadow_trade
-                       (trade_id, session_date, direction, strike, expiry,
-                        contracts, trigger, level, entry_ts, entry_minute,
-                        entry_spot, entry_premium)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    [tid, session_date_of(ts), direction, float(strike),
+                       (trade_id, underlying, session_date, direction, strike,
+                        expiry, contracts, trigger, level, entry_ts,
+                        entry_minute, entry_spot, entry_premium)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    [tid, underlying, session_date_of(ts), direction, float(strike),
                      expiry, int(contracts), trigger, level,
                      ts.replace(tzinfo=None), minute_of(ts),
                      float(entry_spot), float(entry_premium)])
