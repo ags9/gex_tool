@@ -51,30 +51,34 @@ FORBIDDEN = {
                "long position", "short position", "buy the", "sell the",
                "entry level", "exit level", "stop-loss", "stop loss",
                "position size", "sizing", "place a trade", "take profit"],
-    "assertion": ["will ", "should ", "ought to", "going to", "poised",
-                  "set up for", "suggests that price", "implies that price",
-                  "tends to lead", "means price"],
+    # Future tense in any form: the narration describes a state that exists,
+    # and a sentence about what happens next is a forecast however it is
+    # hedged.
+    "assertion": ["will ", "will,", "will.", "would", "should", "ought to",
+                  "going to", "about to", "poised", "set up for", "may ",
+                  "might ", "could ", "suggests that price",
+                  "implies that price", "tends to lead", "means price"],
 }
 
 SYSTEM = """You describe an options gamma map from stored numbers. You are \
 writing a factual readout, not analysis.
 
 Describe only: where spot sits, net gamma and its sign, the nearest structure \
-above and below with distances, the hedging mechanism EXACTLY as given in the \
-"mechanism" field, what changed since the previous poll, and the expiry \
-concentration.
+above and below with distances, what changed since the previous poll, and the \
+expiry concentration.
 
-Never restate or reason about the hedging mechanism yourself — copy the \
-direction given. Positive gamma dampens moves; negative gamma amplifies them. \
-Inverting this is the single worst error you can make here.
+Do NOT describe what dealer hedging does. That sentence is written for you \
+and prepended to your text; writing your own would duplicate it or contradict \
+it.
 
 Absolute constraints:
 - Never state or imply a direction for price. No bullish, bearish, upside, \
 downside, rally, selloff, breakout, breakdown, target.
 - Never give a probability, likelihood, or expectation of any price outcome.
 - Never suggest a trade, entry, exit, or size.
-- Never say what will or should happen. Do not use the words "will" or \
-"should" at all; describe only what IS.
+- Describe only the current state. Use the present tense throughout. Never \
+use the future tense, and never use the words "will", "would", "should", \
+"could", or "may".
 - Describe dealer hedging mechanically ("hedging dampens moves", "hedging \
 amplifies moves"), never as a consequence for price direction.
 
@@ -88,6 +92,92 @@ class Narration:
     model: str
     violations: list[str]
     ok: bool
+    source: str = "model"        # "model" | "template"
+
+
+def mechanism_sentence(net_gex: float) -> str:
+    """The one sentence whose correctness is already known.
+
+    Templated, not generated. A live run stated that negative dealer gamma
+    "reduces the velocity of that move" — fluent, with the numbers correct
+    around it, and exactly inverted. There is no reason to let a model compose
+    a sentence we can write from a sign, and the lint cannot catch a wrong
+    one because the error is factual, not stylistic.
+    """
+    if net_gex > 0:
+        return ("Net dealer gamma is positive, so dealer hedging dampens "
+                "moves.")
+    return ("Net dealer gamma is negative, so dealer hedging amplifies "
+            "moves.")
+
+
+MECHANISM_WORDS = re.compile(
+    r"\b(hedg\w*|dampen\w*|amplif\w*|suppress\w*|pin\w*|cushion\w*)\b",
+    re.IGNORECASE)
+
+
+def strip_mechanism_claims(text: str) -> str:
+    """Remove any sentence in which the model describes the mechanism itself.
+
+    The prompt tells it not to, and it does anyway about one run in three —
+    once producing "hedging dampens moves away from nearby strikes and
+    amplifies reversals toward them" directly beneath the templated sentence
+    saying the opposite. An instruction is a request; this is the guarantee.
+    Markdown headings and bold are dropped in the same pass: the output is a
+    paragraph, not a document.
+    """
+    text = re.sub(r"^#{1,6}\s*.*$", "", text, flags=re.MULTILINE)
+    text = text.replace("**", "").replace("__", "")
+    kept = [snt for snt in re.split(r"(?<=[.!?])\s+", text)
+            if snt.strip() and not MECHANISM_WORDS.search(snt)]
+    return " ".join(kept).strip()
+
+
+def template_summary(poll: dict, context: dict,
+                     expiries: list[dict] | None = None) -> str:
+    """A complete summary from numbers alone, no model involved.
+
+    #daily is never empty: when the model is unavailable or its output trips
+    the lint, this goes out instead. It is less readable and entirely
+    trustworthy, which is the right way round for a fallback.
+    """
+    parts = [
+        f"SPX {poll['spot']:,.0f}. Net gamma {poll['net_gex'] / 1e6:+,.1f}M "
+        f"per point.",
+        mechanism_sentence(poll["net_gex"]),
+    ]
+    if not context["regime"]["called"]:
+        parts.append("Net gamma is inside the dead zone, too small to call a "
+                     "regime.")
+    if poll.get("oi_net") is None:
+        parts.append("The flow overlay was off for this poll, so the map is "
+                     "open interest only.")
+    elif poll.get("flow_net") is not None:
+        parts.append(f"Open interest contributes {poll['oi_net'] / 1e6:+,.1f}M "
+                     f"and today's classified flow {poll['flow_net'] / 1e6:+,.1f}M.")
+
+    levels = context.get("levels") or []
+    above = sorted((l for l in levels if l["distance_pts"] > 0),
+                   key=lambda l: l["distance_pts"])
+    below = sorted((l for l in levels if l["distance_pts"] < 0),
+                   key=lambda l: -l["distance_pts"])
+    if above:
+        parts.append(f"Nearest structure above is {above[0]['strike']:,.0f} "
+                     f"({above[0]['label']}), {above[0]['distance_pts']:+,.0f} "
+                     f"points away.")
+    if below:
+        parts.append(f"Nearest below is {below[0]['strike']:,.0f} "
+                     f"({below[0]['label']}), {below[0]['distance_pts']:+,.0f} "
+                     f"points away.")
+    if expiries:
+        total = sum(e["gamma"] for e in expiries)
+        if total:
+            top = max(expiries, key=lambda e: abs(e["gamma"]))
+            parts.append(f"{abs(top['gamma'] / total):.0%} of the next 30 "
+                         f"days' gamma expires {top['expiry']}.")
+    parts.append("Flow is signed by the tick rule; its error rate on this "
+                 "data is unmeasured.")
+    return " ".join(parts)
 
 
 def lint(text: str) -> list[str]:
@@ -127,7 +217,6 @@ def facts(poll: dict, context: dict, previous: dict | None,
         # with the numbers correct around it. The lint governs form, not
         # truth, and would never have caught it. Anything the model could get
         # backwards is supplied rather than inferred.
-        f"mechanism: {'positive dealer gamma — hedging DAMPENS moves' if poll['net_gex'] > 0 else 'negative dealer gamma — hedging AMPLIFIES moves'}",
         f"regime call: {context['regime']['state']}"
         f"{' (inside the dead zone — too small to call)' if not context['regime']['called'] else ''}",
     ]
@@ -166,7 +255,8 @@ def narrate(poll: dict, context: dict, previous: dict | None = None,
     """
     key = os.getenv("ANTHROPIC_API_KEY", "")
     if not key:
-        return Narration(None, model, ["no ANTHROPIC_API_KEY"], False)
+        return Narration(template_summary(poll, context, expiries), model,
+                         ["no ANTHROPIC_API_KEY"], False, source="template")
     try:
         import anthropic
         client = anthropic.Anthropic(api_key=key)
@@ -180,15 +270,28 @@ def narrate(poll: dict, context: dict, previous: dict | None = None,
         text = "".join(b.text for b in resp.content if b.type == "text").strip()
     except Exception as e:                        # never reaches the caller
         console.log(f"[yellow]narration failed: {e}")
-        return Narration(None, model, [f"api error: {e}"], False)
+        return Narration(template_summary(poll, context, expiries), model,
+                         [f"api error: {e}"], False, source="template")
 
     violations = lint(text)
     if violations:
         # Dropped, not shown and not stored as usable. Logged so a drifting
-        # prompt is visible rather than silently degrading into advice.
+        # prompt is visible rather than silently degrading into advice — and
+        # the templated summary goes out in its place, so a rejection costs
+        # readability, never the daily post.
         console.log(f"[yellow]narration rejected by lint: {violations}")
-        return Narration(None, model, violations, False)
-    return Narration(text, model, [], True)
+        return Narration(template_summary(poll, context, expiries), model,
+                         violations, False, source="template")
+
+    # The mechanism is prepended and any model-authored version removed, so
+    # the paragraph cannot contain two accounts of it.
+    body = strip_mechanism_claims(text)
+    if not body:
+        return Narration(template_summary(poll, context, expiries), model,
+                         ["model wrote only mechanism claims"], False,
+                         source="template")
+    return Narration(f"{mechanism_sentence(poll['net_gex'])} {body}",
+                     model, [], True, source="model")
 
 
 def utcnow() -> dt.datetime:

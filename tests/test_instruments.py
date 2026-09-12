@@ -114,3 +114,60 @@ def test_unknown_instrument_is_refused_not_guessed():
     with pytest.raises(SystemExit):
         instrument("QQQ")
     assert COMPLEX not in INSTRUMENTS, "COMPLEX is derived, never fetched"
+
+
+# ── §13 narration guards (here to keep the module list short) ────────
+def test_mechanism_sentence_is_templated_not_generated():
+    """The one sentence whose correctness is already known. A live model run
+    stated that negative gamma "reduces the velocity of that move" — fluent,
+    numbers right, exactly inverted, and invisible to a style lint."""
+    from gexbot.narrate import lint, mechanism_sentence
+    assert "amplifies" in mechanism_sentence(-1.0e9)
+    assert "dampens" in mechanism_sentence(+1.0e9)
+    assert "dampens" not in mechanism_sentence(-1.0e9)
+    assert "amplifies" not in mechanism_sentence(+1.0e9)
+    # the template must itself survive the lint it is prepended to
+    assert lint(mechanism_sentence(-1.0e9)) == []
+    assert lint(mechanism_sentence(+1.0e9)) == []
+
+
+def test_future_tense_is_rejected():
+    from gexbot.narrate import lint
+    for bad in ("Spot will test 7,650.", "Gamma would flip below here.",
+                "Price may reach the wall.", "This could compress ranges.",
+                "The wall might hold."):
+        assert lint(bad), f"future tense not caught: {bad}"
+    assert lint("Spot sits at 7,650 and gamma is negative.") == []
+
+
+def test_template_summary_stands_alone_and_passes_lint():
+    """#daily is never empty: when the model is unavailable or its output is
+    rejected, this goes out instead — less readable, entirely trustworthy."""
+    from gexbot.narrate import lint, template_summary
+    poll = {"spot": 7650.0, "net_gex": -1.24e7, "oi_net": -1.24e7,
+            "flow_net": 0.0}
+    ctx = {"regime": {"called": False},
+           "levels": [{"strike": 7720.0, "label": "RESISTANCE",
+                       "distance_pts": 70.0, "kind": "call_wall", "gex": 8.9e6},
+                      {"strike": 7500.0, "label": "TRAPDOOR",
+                       "distance_pts": -150.0, "kind": "put_wall", "gex": -4.7e6}]}
+    exps = [{"expiry": "2026-09-18", "gamma": -5.8e7},
+            {"expiry": "2026-09-21", "gamma": -4.4e6}]
+    text = template_summary(poll, ctx, exps)
+    assert lint(text) == [], f"the fallback must pass its own lint: {lint(text)}"
+    assert "amplifies" in text            # correct mechanism for negative net
+    assert "7,720" in text and "7,500" in text
+    assert "dead zone" in text
+    assert "unmeasured" in text           # the honesty note rides along
+    assert len(text) > 200
+
+
+def test_narration_falls_back_to_template_without_a_key(monkeypatch):
+    from gexbot import narrate as n
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    poll = {"spot": 7650.0, "net_gex": 1.5e9, "oi_net": None, "flow_net": None}
+    ctx = {"regime": {"called": True}, "levels": []}
+    r = n.narrate(poll, ctx)
+    assert r.source == "template"
+    assert r.ok is False              # the MODEL did not produce this
+    assert r.text and "dampens" in r.text, "fallback still carries the mechanism"

@@ -144,12 +144,16 @@ def create_app(db_path=None, results_root=None) -> FastAPI:
                                        poll.get("underlying") or "I:SPX")
         exps = await asyncio.to_thread(reader.expiries, poll["poll_id"])
         result = await asyncio.to_thread(narrate, poll, poll["context"], prev, exps)
+        # Only model prose is cached. A templated fallback is cheap to
+        # recompute and should not fossilise into the record as though the
+        # model produced it.
         if result.ok and result.text:
             await asyncio.to_thread(
                 StateStore(reader.path).write_narration,
                 poll["poll_id"], result.text, result.model)
         return {"poll_id": poll["poll_id"], "as_of": poll["ts"],
                 "narration": result.text, "model": result.model,
+                "source": result.source,
                 "violations": result.violations, "cached": False}
 
     @app.get("/api/session/{date}/premium")

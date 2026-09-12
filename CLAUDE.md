@@ -360,21 +360,27 @@ live), ports 8741/8742. **Never commit `.env`; never send creds anywhere.**
 
 **Open**
 
-- **BUG: the strike profile draws no bars in `flow` source mode.** OI, DEX and
-  volume modes render correctly on the same data and the same chart. Measured,
-  not inferred: the ECharts option contains 155 valid bar values (max +8.87M),
-  a category y-axis of matching length, and a sane grid; markLines render; an
-  exhaustive canvas pixel count finds no bar-coloured pixels. Ruled out — the
-  stack (reducing flow mode to a single series changes nothing), `filterMode`
-  (set to `none`, no change), the §10.1 units divisor (present at divisor 1),
-  and any code difference from the last known-good render (the flow branch is
-  byte-identical to it; the regression appeared when the chain widened from
-  ~80 to 155 strikes with mixed 5/10/25-point spacing). Next step is a minimal
-  ECharts repro outside the app. Workaround: the `OI` toggle.
-- **§13 narration rejects roughly half its output.** The lint is working as
-  designed — dropped, never shown — but the model reaches for "will" often
-  enough that the prose is intermittent. Tighten the prompt before relying on
-  the daily post.
+- **BUG: the strike profile chart intermittently creates no renderer.** The
+  container carries `_echarts_instance_` and a `zr-dom` child but **no
+  `<canvas>` element at all**, so nothing draws — it is not a data or option
+  fault. Measured and ruled out, in this order:
+  - NULLs in the series — none: 0/155 null across gex, oi_gex, flow_gex, dex,
+    volume.
+  - Duplicate or non-monotonic categories from the mixed 5/10/25-point strike
+    spacing — none: 155 labels, 155 distinct, strictly descending. (Spacing is
+    irrelevant to a category axis; the entries are ordinal.)
+  - The stacked series — reducing flow mode to a single series identical to
+    the working OI branch changes nothing.
+  - `dataZoom.filterMode` — set to `none`, no change.
+  - The §10.1 units divisor — fails at divisor 1 too.
+  - React StrictMode's double-mount — **a production build fails identically**,
+    so it is not the dev double-invoke.
+  - A thrown error — the console is clean.
+
+  The expiry panel, same library and same page, always renders. Next step is a
+  minimal ECharts repro of a category y-axis with ~155 entries, a value
+  x-axis, a `startValue`/`endValue` dataZoom and a markLine. Workaround: the
+  `OI` toggle, which renders reliably.
 
 - **SPY×10 is not SPX.** The ETF carries a persistent basis to the index
   (dividends, expense, tracking) — measured at ~0.2%, or ~15 SPX points,
@@ -521,7 +527,9 @@ live), ports 8741/8742. **Never commit `.env`; never send creds anywhere.**
      column from a SELECT, one produced a schema with a missing comma).
   7. **A lint or schema check governs form, not truth.** The narration lint
      passes text that inverts the gamma mechanic. Anything the model could
-     state backwards is supplied to it as a fact, never inferred.
+     state backwards is templated in code, not asked for — and anything it is
+     told not to write is also *removed* after the fact, because an
+     instruction is a request and roughly one run in three ignored it.
 
 - **State the §3 rule before any work that touches strategy parameters.**
 - Log every backtest/control/sweep run to `docs/RUNLOG.md`, labelled
