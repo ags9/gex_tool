@@ -261,10 +261,22 @@ rescaling of the first.
   scale.
 - `watch.py` gains `--underlying` plumbed through to the engine, and the
   live feed subscribes `T.O:SPY*` when SPY is selected.
-- Storage: `poll_snapshot` and `poll_strike` gain an `underlying VARCHAR
-  NOT NULL DEFAULT 'I:SPX'` column, part of the primary key alongside
-  `poll_id`. Existing rows backfill to `I:SPX`. Every API session endpoint
-  takes `?underlying=` and defaults to `I:SPX`.
+- Storage: `poll_snapshot`, `alert_log` and `shadow_trade` gain an
+  `underlying VARCHAR NOT NULL DEFAULT 'I:SPX'` column. Existing rows
+  backfill to `I:SPX`. Every API session endpoint takes `?underlying=` and
+  defaults to `I:SPX`.
+
+  **Amended 2026-09-11, superseding the original wording**, which asked for
+  the column on `poll_strike` too and for a composite primary key:
+
+  - `poll_strike` does **not** carry `underlying`. It reaches one through
+    `poll_id`. Denormalising would repeat the same string across ~155 rows
+    per poll and create a second place for the two to disagree — the join is
+    free and the single source of truth is worth more.
+  - The primary key stays `poll_id` alone. Every poll of every instrument
+    gets its own id from the same monotonic allocator, so `poll_id` is
+    already globally unique; a composite key would be redundant, and it
+    would wrongly imply that two instruments can share an id.
 - UI: an **instrument selector** — `SPX · SPY · combined` — distinct from
   the units toggle in 10.1. Selecting SPY shows SPY's own map with its own
   levels.
@@ -317,3 +329,159 @@ Strictly descriptive. No implication about what the touch means.
 None. SPY options are OPRA, already covered by the Options Advanced
 subscription; the chain snapshot endpoint is the same. No new entitlement,
 no backfill — SPY trades are already on disk from 2021.
+# Spec Addendum — Expiry Structure, Net Delta, and Narration
+
+Appends to `docs/PHASE3_UI_SPEC.md`. Same constraints apply: `CLAUDE.md` §3
+(strategy frozen), §0 of the UI spec (no directional claims, no forecasts,
+no number we cannot source).
+
+---
+
+## 11. Gamma decay by expiry
+
+Today's map is a snapshot with no sense of its own shelf life. A profile
+where 57% of the gamma expires Friday is a different object from one where
+it expires in a month, and nothing in the UI currently says which we have.
+
+### 11.1 Computation
+
+From the chain snapshot, group contracts by `expiration_date` and compute
+dealer gamma per expiry using the same convention as `build_profile`
+(per-point, same dealer model, same strike window).
+
+For each future date `D` in the next ⚙30 calendar days:
+
+```
+remaining(D) = Σ gamma over contracts with expiry > D
+pct(D)       = remaining(D) / remaining(today)
+```
+
+Store per poll:
+
+```sql
+CREATE TABLE IF NOT EXISTS poll_expiry (
+    poll_id       BIGINT NOT NULL,
+    expiry        DATE NOT NULL,
+    gamma         DOUBLE NOT NULL,   -- dealer gamma expiring ON this date
+    delta         DOUBLE NOT NULL,   -- dealer delta expiring ON this date (§12)
+    oi            BIGINT NOT NULL,
+    put_call_oi   DOUBLE,            -- put OI / call OI on this expiry
+    PRIMARY KEY (poll_id, expiry)
+);
+```
+
+`remaining` and `pct` are derived on read — do not store cumulative values
+that can disagree with their components.
+
+### 11.2 Display
+
+A bar per upcoming expiry showing gamma expiring on that date, plus a line
+showing percent of current gamma still alive after it. Mark known event
+dates (monthly OPEX, quarterly OPEX) from an exchange calendar, not by
+guessing from OI size.
+
+State facts only: "57% of current gamma expires 9/18." Not "the structure
+deteriorates into Friday."
+
+### 11.3 Rolloff
+
+Once two sessions of `poll_expiry` exist, the pre-market summary (§10.4)
+reports what expired overnight: gamma removed, delta removed, and the
+resulting change in net. Descriptive, sourced from two stored profiles.
+
+---
+
+## 12. Net delta (DEX)
+
+`greeks.py` computes delta already; nothing aggregates it.
+
+- Add `dex` (net dealer delta) and `dex_by_strike` alongside gamma in
+  `build_profile`, same dealer-model convention.
+- Store `net_dex` on `poll_snapshot`; per-strike delta on `poll_strike`.
+- UI: a DEX toggle beside GEX on the strike profile, and a `net delta` field
+  in the header strip. Same trend panel treatment as net gamma.
+- Label it exposure. Never "mechanical bid," never "cushion" — those are
+  interpretations of what delta exposure implies, and we have not tested
+  whether the implication holds.
+
+Week-over-week comparison of net gamma and net delta comes free once the
+store has ≥2 weeks of sessions. Show it as a delta between two stored
+values, with both dates named.
+
+---
+
+## 13. Narration (Anthropic API)
+
+A readable description of the current map, generated from stored numbers.
+
+### 13.1 What it is
+
+`GET /api/session/narrate?underlying=&poll_id=` → a short paragraph
+describing: where spot sits, net gamma and its sign, the nearest structure
+above and below with distances, what the regime mechanically implies, what
+changed since the previous poll, and the expiry picture from §11.
+
+Posted once daily to `#daily` as a map summary; available on demand in the UI.
+
+### 13.2 What it must not do
+
+The system prompt forbids, and the endpoint rejects output containing:
+
+- Directional language: bullish, bearish, upside, downside, rally, selloff,
+  breakdown, breakout, target.
+- Probability or likelihood of any price outcome.
+- Trade suggestions, entry or exit levels, or sizing.
+- Claims about what "will" or "should" happen.
+
+Rationale, stated here so a future session does not relax it: this system's
+entry logic was tested against four null models across two rounds and did
+not beat random out-of-sample (`CLAUDE.md` §2). A language model handed the
+same data will produce a fluent, confident directional read regardless,
+because that is what its training distribution contains — and a prediction
+generated from *your own* numbers feels more credible than a stranger's,
+while having exactly the same (absent) validity. The model also cannot see
+what it does not know: that tick-rule error is unquantified, that a given
+poll's flow overlay was zero, that the 2022 control test failed.
+
+### 13.3 Implementation
+
+- Model: cheapest suitable tier. Input is the poll's stored fields, not raw
+  chain data. Est. a few cents per day.
+- Runs in its own process path; an API failure returns `narration: null`
+  and the UI shows the numbers without prose. Never blocks a poll, never
+  blocks an alert.
+- Every narration is stored with its `poll_id` and the model version, so
+  the text can be audited against the numbers that produced it.
+- Output passes a lint against the forbidden-term list before storage or
+  display. A violation is logged and the narration is dropped, not shown.
+
+### 13.4 The predictive variant — logged, never displayed
+
+If a directional narration is ever wanted, it is built as a blind
+experiment, not a feature:
+
+- A second prompt produces a directional call and stores it, with the poll
+  it was generated from.
+- It is **not shown in the UI or Discord.**
+- After ≥⚙200 calls, score them against subsequent price movement and
+  report the hit rate against a matched-random baseline — the same
+  control-experiment discipline used for the strategy itself.
+- Only a result that beats the baseline at p ≤ 0.05 earns display, and that
+  decision requires a written pre-registration first.
+
+---
+
+## 14. Explicitly not building
+
+From the reference posts that prompted this addendum:
+
+- Rate-hike or event probabilities (not our data; sourced from futures
+  markets we do not subscribe to).
+- Regime labels like "G-D+" that compress gamma and delta signs into a
+  taxonomy implying a behavioural forecast.
+- Prose framings — "structure deteriorated", "thinner cushion", "wider
+  ranges" — that assert consequence rather than state condition.
+- MOC imbalance (needs an equity auction subscription; one inferential step
+  from an SPX decision; no validated use).
+- Dark pool prints (midpoint executions have no aggressor side, so
+  direction is unknowable; needs a Stocks subscription).
