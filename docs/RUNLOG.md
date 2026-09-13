@@ -580,3 +580,336 @@ and no tranche.
    frozen, `synth.atr30` now coalesces back to 5-minute ranges before
    measuring. Without that, minute replay would have tightened every trail
    roughly threefold on the most volatile days.
+
+
+---
+
+## 2026-09-13 — Reliability caveat on round three's mutation results
+
+Python caches bytecode by `(mtime, size)`. A mutation of the **same byte length**
+restored within the same filesystem second leaves the stale `.pyc` in place, so
+the interpreter keeps running mutated code against restored source, or the
+reverse. Measured in round four: `max_contracts: int = 2` mutated to `= 3` and
+restored reported a cap of 3 from a file that read 2, and two tests failed
+against correct code.
+
+**Round three's mutation checks did not clear `__pycache__`, so any of them that
+flipped a parameter VALUE — same-length edits like `0.05` → `0.10`, `2` → `1` —
+are unreliable as evidence about the mutation technique.** Structural mutations
+(deleting a guard, changing a call, `if open_pos:` → `if False:`) changed the byte
+count and are not affected.
+
+**The round three verdict itself stands.** P(random ≥ strategy) = 1.000 on all
+four null arms — every one of 80 random runs beat the strategy — is not a margin a
+mutation-level defect can reverse, and the loss distribution, the per-trade
+figures and the mark provenance are unaffected. This caveat is about **how
+strongly the mutation technique can be cited as having verified that harness**,
+not about the conclusion it reached.
+
+Round four's harness re-ran all 21 mutations with `__pycache__` cleared before
+every run and control runs bracketing the sweep. Six were same-byte-length; all
+six bite.
+
+---
+
+# Round four — 0DTE SPX iron condors (`PREREGISTRATION_V3.md`, tag `prereg-v3`)
+
+A **different strategy family**. Rounds one to three are closed by v2 §7 and this
+does not reopen them: nothing in `condor.py` reads a GEX level, wall, flip point
+or magnet, and there is no field for one, so the exclusion is structural rather
+than a convention (prereg-v3 §2).
+
+## 2026-09-13 — AMENDMENT to §3.1, recorded BEFORE any run
+
+**§3.1 wing width: ⚙5 points, amended from the registered ⚙20.**
+Operator decision. Recorded before the Stage 1 run so it cannot read as a
+post-hoc adjustment.
+
+### Why the two registered numbers could not both hold
+
+§3.3 risks **1% of the §1 tranche** — 1% × $25,000 = **$250 per trade** — and
+computes it from *actual max loss*, `(width − credit) × 100`. §3.1 registered
+**20-point wings**. Measured on six real sessions with the delta-selection
+harness (real listed strikes, IV inverted from each contract's own NBBO):
+
+| session | spot | short P / long P | short C / long C | credit | max loss | % of tranche | contracts |
+|---|---|---|---|---|---|---|---|
+| 2023-03-15 | 3860 | 3810 / 3790 | 3905 / 3925 | 4.60 | $1,540 | 6.2% | 0 |
+| 2023-09-20 | 4454 | 4420 / 4400 | 4485 / 4505 | 4.03 | $1,598 | 6.4% | 0 |
+| 2024-02-14 | 4989 | 4965 / 4945 | 5010 / 5030 | 2.73 | $1,727 | 6.9% | 0 |
+| 2024-07-17 | 5605 | 5570 / 5550 | 5635 / 5655 | 3.70 | $1,630 | 6.5% | 0 |
+| 2025-03-12 | 5597 | 5535 / 5515 | 5665 / 5685 | 3.60 | $1,640 | 6.6% | 0 |
+| 2025-09-10 | 6549 | 6520 / 6500 | 6565 / 6585 | 3.42 | $1,658 | 6.6% | 0 |
+
+One 20-wide contract risks **6.2–6.9% of tranche, not 1%**, so `size_for`
+returned **0 contracts on every session** and Stage 1 would have compared nothing
+against nothing — §4's "silently reduced sample" failure arriving through §3.3
+rather than through expiry coverage. Reaching 1% at 20-wide needs a tranche of
+**$163,750**.
+
+### Why the wing width is the number that moved
+
+§1's tranche and §3.3's 1% rule are **load-bearing**: §1 argues the $25,000
+explicitly (SPX spreads risk ~$500 each; XSP's book costs more in crossing than
+the trade collects), and §6's tail criterion — no single day worse than 5% of
+tranche — is stated against that figure. The wing width was **convention**.
+
+### The accepted cost, stated up front
+
+Narrow wings **collect less credit** and are **more slippage-sensitive per
+premium dollar**: the same four half-spreads are crossed against a smaller
+credit, so cost as a fraction of premium rises. That is a real strategy cost,
+accepted by the operator, and the per-leg fill model will show it rather than
+hide it.
+
+**Wing width is sweepable after Stage 1, never before** (§5.3).
+
+### What the amendment does NOT settle
+
+It moves the constraint off a parameter and onto a **market fact**. At 5-point
+wings one contract is affordable only when
+
+    (5 − credit) × 100 ≤ 250   →   credit ≥ **$2.50 per condor**
+
+which is half the 5-point width — a demanding credit for 16-delta shorts.
+
+### MEASURED: the amendment does not close the gap · 0 contracts on 10 of 10
+
+Ten real sessions spanning 2022-09 → 2025-09, 5-point wings, same delta
+selection, 187 probes, zero IV inversion failures:
+
+| session | spot | short P / long P | short C / long C | credit | max loss | % of tranche | contracts |
+|---|---|---|---|---|---|---|---|
+| 2022-09-15 | 3932 | 3895 / 3890 | 3970 / 3975 | 1.42 | $358 | 1.4% | 0 |
+| 2023-03-15 | 3860 | 3810 / 3805 | 3905 / 3910 | 1.50 | $350 | 1.4% | 0 |
+| 2023-06-14 | 4380 | 4340 / 4335 | 4420 / 4425 | 1.30 | $370 | 1.5% | 0 |
+| 2023-09-20 | 4454 | 4420 / 4415 | 4485 / 4490 | 1.45 | $355 | 1.4% | 0 |
+| 2024-02-14 | 4989 | 4965 / 4960 | 5010 / 5015 | 1.25 | $375 | 1.5% | 0 |
+| 2024-07-17 | 5605 | 5570 / 5565 | 5635 / 5640 | 1.15 | $385 | 1.5% | 0 |
+| 2024-11-06 | 5904 | 5850 / 5845 | 5935 / 5940 | **−0.05** | $505 | 2.0% | 0 |
+| 2025-03-12 | 5597 | 5535 / 5530 | 5665 / 5670 | **−0.75** | $575 | 2.3% | 0 |
+| 2025-06-10 | 6021 | 5990 / 5985 | 6045 / 6050 | 0.90 | $410 | 1.6% | 0 |
+| 2025-09-10 | 6549 | 6520 / 6515 | 6565 / 6570 | 1.32 | $368 | 1.5% | 0 |
+
+**Measured credits are $0.90–$1.50 against the $2.50 the 1% budget requires.**
+Max loss is $350–$575 per contract, i.e. **1.4%–2.3% of tranche, not 1%** — much
+closer than 20-wide's 6.2–6.9%, but still above it, so `size_for` returns 0 and
+**Stage 1 still cannot run**. The amendment moved the shortfall from a factor of
+~6.5 to a factor of ~1.5–2.3; it did not remove it.
+
+The accepted cost is visible in the same table: 20-wide collected $2.73–$4.60,
+5-wide collects $0.90–$1.50 — roughly a third of the credit for a quarter of the
+width, i.e. cost per premium dollar is materially worse, exactly as anticipated.
+
+### Second finding: two sessions show a NEGATIVE mid credit
+
+2024-11-06 (−$0.05) and 2025-03-12 (−$0.75) price the long wings ABOVE the
+shorts, which is impossible for a vertical spread: a 5535 put cannot be worth
+less than a 5530 put. Those are **stale or crossed NBBO on deep-OTM 0DTE
+strikes** — both sessions put the shorts 62–68 points out, where 0DTE quotes are
+sparse. `min_credit` rejects them as `credit_too_thin`, which is the right
+behaviour but the wrong LABEL: a data-quality skip is being recorded as a market
+condition. Needs a distinct skip reason before any sample count is quoted.
+
+### Tension between §3.3's contract cap and §6's tail criterion, at this tranche
+
+Independently of the sizing question: §6 requires no single day worse than **5%
+of tranche** = $1,250. With a measured worst-case max loss of $575/contract,
+§3.3's cap of **3 contracts** permits a worst day of $1,725 = **6.9% of
+tranche**, which breaches §6. The cap is only consistent with §6 at **2
+contracts** here. Recorded now rather than discovered at Stage 2.
+
+## 2026-09-13 — AMENDMENT to §3.3, recorded BEFORE any run
+
+**`risk_per_trade_frac` 1% → ⚙2.5%; contract cap 3 → ⚙2.** Operator decision.
+Follows directly from the measurement above, which showed the §3.1 wing
+amendment alone still produced 0 contracts on 10 of 10 real sessions.
+
+### Reasoning
+
+**§6 constrains the DAY, and that is what protects the tranche.** The 1%
+per-trade figure was imported convention carrying no stated justification
+anywhere in the pre-registration, which makes it the softer of the two claims —
+unlike §1's tranche, which §1 argues explicitly, and unlike §6's 5% worst-day
+limit, which is a registered criterion.
+
+**At 2.5% one contract fits and two stays inside the 5% worst-day limit.**
+Budget becomes $625. Every max loss measured on real sessions — $350 to $575 —
+sizes to exactly one contract. Two contracts against the worst observed max loss
+is $1,150, inside §6's $1,250.
+
+**The 3-contract cap breached the day limit at any sizing where one contract was
+viable** (3 × $575 = $1,725 = 6.9% of tranche), so it was a ceiling that could
+never legally be reached. Removed rather than left looking permissive.
+
+A cap of 2 is a genuine ceiling rather than a dead one: a second contract needs a
+credit of $1.875 on a 5-wide, above every credit measured ($0.90–$1.50), so it
+will bind rarely but legitimately.
+
+**§1 ($25,000) and §3.1-as-amended (5-point wings) are unchanged. Both remain
+load-bearing.** Sweepable after Stage 1, never before.
+
+### Amendment ledger for round four
+
+| clause | registered | amended to | why |
+|---|---|---|---|
+| §3.1 wing width | 20 points | **5 points** | 20-wide risks $1,637/contract against a $250 budget — arithmetically untradeable |
+| §3.3 risk per trade | 1% | **2.5%** | 5-wide still risks $350–$575; §6 constrains the day, not the trade |
+| §3.3 contract cap | 3 | **2** | 3 × $575 = 6.9% of tranche, breaching §6's 5% worst-day limit |
+
+Unchanged: §1 tranche $25,000, SPX only · §3.1 10:30 entry, 16-delta shorts,
+0 DTE, $1.00 short-leg spread gate · §3.2 50% target, 2× credit stop, 15:45 flat ·
+§3.4 event vetoes · §6 all criteria.
+
+Three ⚙ parameters amended, all before any result was read, all recorded with
+reasoning. §5.3's budget of ≤6 tuned parameters is for TUNING after Stage 1
+passes; these are corrections to an internally inconsistent registration, not
+tuning against a result, and no result existed when they were made.
+
+## Harness built 2026-09-13 · `development` (no strategy run)
+
+| item | state |
+|---|---|
+| `condor.py` | Pure logic. §3.1 entry, §3.2 exits, §3.3 sizing, §3.4 event vetoes. No GEX field exists. §7's forbidden adjustment mechanics have no code path. |
+| `condorsim.py` | Per-leg fills: four spreads crossed each way, **eight** commissions per contract. Not a net-credit shortcut. |
+| `odte_chain.py` | §4 availability, real listed strike grid, delta selection by inverting IV from each leg's own NBBO. Wings snapped to listed strikes. |
+| tests | 16 known-answer tests, hand-computed to the cent. 275 tests total. |
+
+### §4 same-day expiry availability — measured
+
+**1,006** development sessions have `opra_trades`; **972 have a same-day SPXW
+expiry**; **34 do not**. All 34 fall in **2022-01-04 → 2022-07-04**, on
+**Mon 3 / Tue 14 / Thu 17** — SPXW ran Mon/Wed/Fri expirations in early 2022 and
+added Tue/Thu during that year. This is a market-structure rollout, not a data
+gap, but the skipped sessions carry a **day-of-week skew concentrated in H1
+2022** and that travels with any result.
+
+### Defects found by the known-answer tests, before any run
+
+1. **Commission was missing entirely from condor P&L.** Caught at −$430.00
+   against a hand-computed −$435.20 — exactly 8 × $0.65, four legs in and out.
+   The same class as round three's defect #6, found here *before* a run instead
+   of after one.
+2. **A mutation inverting the profit-target formula passed.** At the registered
+   50%, `credit × (1 − f)` and `credit × f` are the SAME NUMBER, so no test at
+   the default could distinguish them. Now pinned at 75% and 25% where they
+   diverge — and §5 permits sweeping that parameter after Stage 1, which would
+   have been meaningless with the direction inverted.
+3. **Stop slippage was asymmetric.** `FillModel.buy` had no `stop_triggered`, so
+   a stopped condor paid the adverse tick only on the legs being SOLD — the
+   cheap side. A multi-leg stop closes shorts by buying them back. Now symmetric.
+
+Twelve mutations aimed at the harness; eleven bit immediately, the twelfth was
+defect 2 above and is now covered.
+
+
+## 2026-09-13 — Stage 1, round four · `evidence`
+
+**Logged at launch, before any result exists** (§7).
+
+| field | value |
+|---|---|
+| label | **`evidence`** — §8's kill criteria attach to this run |
+| purpose | `PREREGISTRATION_V3` §5.2 Stage 1: does a mechanically-entered 0DTE condor beat matched-random condors? |
+| partition | Development 2022-01-03 → 2025-12-31. Checkpoint and holdout untouched |
+| parameters | Registered defaults **as amended 2026-09-13**: 5-point wings, 2.5% risk, cap 2. Everything else as registered — 10:30 entry, 16-delta shorts, 0 DTE, $1.00 short-leg gate, 50% target, 2× credit stop, 15:45 flat, §3.4 vetoes, $25,000 tranche, SPX only |
+| seeds | 20 per arm (§5.2 requires ≥20) |
+| arms | `random_time` (does 10:30 matter?), `random_strikes` (does 16-delta matter?), `random_both` (bare variance-premium baseline). `shuffled_levels` **n/a** per §6 |
+| marks | Real NBBO only. **No Black-Scholes path exists in this harness** — an unquotable leg skips the session rather than being modelled |
+
+**Reading rule fixed in advance (§6's own language).** If the strategy beats only
+`random_both`, that is **not a pass**: it means the variance premium is real and
+the registered parameters contribute nothing, and the honest conclusion is "sell
+condors at any time", not "this strategy works". Recorded before the numbers so it
+cannot be renegotiated after them.
+
+### Two quantities the report will lead with, beyond §7's loss distribution
+
+1. **Credit per trade and cost-to-credit.** Eight crossings plus $5.20 commission
+   against a 5-wide credit. Hand-computed in the known-answer tests: the same
+   $52.70 of cost is 13.2% of a 20-wide's $4.00 credit but **40.5%** of a 5-wide's
+   $1.30. If that ratio drives the outcome, then §3.1's wing amendment — made for
+   SIZING, not for edge — is the binding constraint on the result, and the finding
+   is about the amendment rather than about the variance premium.
+2. **The veto-disabled comparison, read explicitly.** §3.4's FOMC and CPI dates
+   are hardcoded from model knowledge and UNVERIFIED, and at a 10:30 entry the
+   veto skips 126 of 1,043 weekdays (12.1%). The driver prints a verdict: if
+   per-trade P&L moves >20% or changes sign, the calendar is doing real work and
+   must be checked against a primary source before the result is cited; otherwise
+   the unverified dates are contained.
+
+### Harness performance note
+
+A one-month smoke initially ran 8 minutes without finishing. Cause:
+`OdteChain.strike_grid` re-scanned the day's whole `opra_trades` file on every
+call, and a control run calls `build_structure` ~62 times per session (1 strategy
++ 1 no-veto + 3 arms × 20 seeds), each reading the grid 3-4 times — roughly 250
+full-file scans per session. Memoised per day with an explicit `forget(day)` to
+keep memory bounded: the same smoke now runs in **3.2 minutes**. The loop was also
+restructured day-outer so each session's contracts are fetched once and all 62
+passes use them hot; the 60 per-(arm, seed) RNGs are built once outside the loop
+so every seed remains an independent run over the whole period.
+
+### Pre-flight defects found and fixed before the run counted · 2026-09-13
+
+The first launch was stopped at 100/1043 sessions (86 min, no result read) when
+its projection revised from ~35 min to ~15 h. Three defects surfaced while fixing
+that, and one of them would have invalidated the run outright.
+
+**D1 — the RNG seeds were not reproducible. This is the one that mattered.**
+The driver seeded its 60 per-(arm, seed) generators with
+`random.Random(hash((arm, seed)))`. Python salts string hashing per process, so
+the same expression returned `7618889921196535603`, `-1412595963612279896` and
+`-5234276928710326056` in three consecutive processes: **every execution drew a
+different set of random entries, and the Stage 1 p-values could not have been
+re-derived or checked by anyone.** Fixed to `zlib.crc32`, and two identical runs
+now reproduce all 16 reported quantities exactly.
+
+`control.py:223` already carried the comment *"zlib.crc32 is stable across
+processes; hash() is randomized"*, written in round three for this exact reason.
+The new driver was written with `hash()` anyway — a **transfer failure**, so the
+lesson is now CLAUDE.md working agreement 9 rather than one module's comment.
+
+It was caught by a determinism check that existed for an unrelated purpose:
+verifying that a cache-warming optimisation was result-neutral.
+
+**D2 — a failed fetch was cached as a permanent absence.**
+`MarkFetcher._fetch` returned `None` for a 404, a network error and an empty
+paginated walk alike, and `get` wrote an empty parquet for all three. One
+rate-limit during a multi-hour concurrent run would therefore have written
+"this contract has no quotes" **permanently** into a cache every future backtest
+reads, indistinguishable afterwards from a genuine absence. Now returns
+`(df, status)` with `"data"` / `"absent"` / `"failed"`; only `"absent"` is
+cached, and `"failed"` is not even memoised for the current run.
+
+**D3 — sustained throttling was an infinite loop.** `pages` is deliberately not
+incremented on a 429, so `while pages < max_pages` never advanced. Bounded at 6
+retries with capped backoff, returning `"failed"`.
+
+### Cache integrity — MEASURED, not assumed
+
+1,842 empty cache files exist. 40 were sampled at random and re-fetched
+**serially** (backed up and restored, so nothing was lost either way):
+
+| outcome | count |
+|---|---|
+| came back WITH DATA — cache was lying | **0** |
+| genuinely empty, confirmed | 40 |
+| fetch failed, correctly left uncached | 0 |
+
+**Poisoned rate 0.0%**, ~0 of 1,842 extrapolated. Earlier concurrent work did not
+corrupt the cache; the empties are real quoteless deep-OTM contracts.
+
+### Performance, and one wrong turn recorded
+
+`OdteChain.strike_grid` re-scanned the day's whole `opra_trades` file on every
+call — ~250 full scans per session across the 62 passes. Memoised per day with
+`forget(day)`: a 21-session smoke went from 8+ min unfinished to 3.2 min.
+
+A blanket per-session cache warm was then tried and **removed**: prefetching every
+strike within 2.5% of the day's spot range fetched ~79 contracts per session
+against the ~18 the passes actually touch, so over-fetching 4× and dividing by 8
+threads was slower than serial. Replaced with batch-concurrent probing of only
+the delta walk's candidate strikes, bounded by `max_probes`.
+
+_Result appended below when the run completes._
